@@ -1,0 +1,2171 @@
+
+'use client';
+import React, { useState, useEffect } from 'react';
+import { ArrowLeft, Gamepad2, Brain, X, Circle, RefreshCw, Cpu, Gauge, Spade, Heart, Club, Diamond, CreditCard, Grid, Zap, Lock, Eye, EyeOff, AlertTriangle, Fish, Anchor } from 'lucide-react';
+import { Card, Button, formatNumber, calculateLevel } from './Shared';
+import { soundEngine } from '../services/soundEngine';
+import { checkTTTWinner, getBestTTTMove, predictRPSMove, createDeck, calculateHandValue, generateMemorySequence } from '../services/aiEngine';
+import enhancedArcadeAI from '../services/enhancedAI';
+import { RPSMove, TTTDifficulty, Card as CardType, MemoryGameState, Stats } from '../types';
+import FishingGame from './FishingGame';
+import PlinkoGame from './PlinkoGame';
+
+interface ArcadeProps {
+  balance: number;
+  onUpdateBalance: (amount: number) => void;
+  onBack: () => void;
+  stats: Stats;
+  isAdmin: boolean;
+  isBanned?: boolean;
+  isTroll?: boolean;
+}
+
+type GameType = 'menu' | 'ttt' | 'rps' | 'blackjack' | 'memory' | 'fishing' | 'plinko';
+
+const Arcade: React.FC<ArcadeProps> = ({ balance, onUpdateBalance, onBack, stats, isAdmin, isBanned = false, isTroll = false }) => {
+  const [game, setGame] = useState<GameType>('menu');
+  const [bet, setBet] = useState<number>(100);
+
+  // If user is banned, show ban message and prevent gameplay
+  if (isBanned) {
+    return (
+      <div className="min-h-screen flex items-center justify-center p-4">
+        <Card className="max-w-md text-center">
+          <div className="flex flex-col items-center gap-4">
+            <div className="p-3 bg-red-500/20 rounded-full">
+              <AlertTriangle className="w-12 h-12 text-red-500" />
+            </div>
+            <h2 className="text-xl font-bold text-red-500">Account Banned</h2>
+            <p className="text-gray-400">Your account has been banned and you cannot access the arcade.</p>
+            <Button onClick={onBack} className="mt-4">
+              <ArrowLeft className="w-4 h-4 mr-2" />
+              Back to Dashboard
+            </Button>
+          </div>
+        </Card>
+      </div>
+    );
+  }
+
+  // If user is a troll, apply special behavior
+  const trollMultiplier = isTroll ? 0.5 : 1; // Troll users get 50% of normal rewards
+  const trollPenalty = isTroll ? 1.5 : 1; // Troll users pay 1.5x for bets
+
+  // Play troll sound effect when component mounts if user is a troll
+  useEffect(() => {
+    if (isTroll) {
+      soundEngine.playTrollEffect();
+    }
+  }, [isTroll]);
+
+  // --- TIC TAC TOE STATE ---
+  const [board, setBoard] = useState<(string | null)[]>(Array(9).fill(null));
+  const [isPlayerTurn, setIsPlayerTurn] = useState(true);
+  const [gameStatus, setGameStatus] = useState<'playing' | 'won' | 'lost' | 'draw'>('playing');
+  const [tttDifficulty, setTttDifficulty] = useState<TTTDifficulty>('hard');
+
+  // --- RPS STATE ---
+  const [rpsHistory, setRpsHistory] = useState<Record<string, Record<string, number>>>({
+      rock: { rock: 0, paper: 0, scissors: 0 },
+      paper: { rock: 0, paper: 0, scissors: 0 },
+      scissors: { rock: 0, paper: 0, scissors: 0 }
+  });
+  const [lastPlayerMove, setLastPlayerMove] = useState<RPSMove | null>(null);
+  const [rpsResult, setRpsResult] = useState<{player: RPSMove, ai: RPSMove, outcome: 'win'|'lose'|'draw'} | null>(null);
+  const [aiConfidence, setAiConfidence] = useState<number>(0);
+  const [rpsGameHistory, setRpsGameHistory] = useState<Array<{playerMove: RPSMove, aiMove: RPSMove, outcome: 'win' | 'lose' | 'draw'}>>([]);
+  const [tttGameHistory, setTttGameHistory] = useState<Array<{board: (string | null)[], move: number}>>([]);
+  const [memoryGameHistory, setMemoryGameHistory] = useState<Array<{sequence: number[], playerSequence: number[], success: boolean}>>([]);
+
+  // --- BLACKJACK STATE ---
+  const [deck, setDeck] = useState<CardType[]>([]);
+  const [playerHand, setPlayerHand] = useState<CardType[]>([]);
+  const [dealerHand, setDealerHand] = useState<CardType[]>([]);
+  const [bjStatus, setBjStatus] = useState<'betting' | 'playing' | 'dealerTurn' | 'gameOver'>('betting');
+  const [bjOutcome, setBjOutcome] = useState<'win' | 'lose' | 'push' | 'blackjack' | null>(null);
+
+  // --- MEMORY HACK STATE ---
+  const [memState, setMemState] = useState<MemoryGameState>({
+      sequence: [],
+      playerInput: [],
+      status: 'idle',
+      level: 1
+  });
+  const [activeButton, setActiveButton] = useState<number | null>(null);
+
+  useEffect(() => {
+    enhancedArcadeAI.initializeModels();
+  }, []);
+
+  // --- PROGRESSION ---
+  const currentLevel = calculateLevel(stats.xp);
+  
+  const GAME_UNLOCKS = {
+      ttt: 1,
+      rps: 3,
+      blackjack: 5,
+      memory: 8
+  };
+
+  const isUnlocked = (type: keyof typeof GAME_UNLOCKS) => {
+      if (isAdmin) return true;
+      return currentLevel >= GAME_UNLOCKS[type];
+  };
+
+  // --- BETTING HELPERS ---
+  const handleBetChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+      setBet(Math.max(0, Math.min(balance, parseInt(e.target.value) || 0)));
+  };
+
+  const setMaxBet = () => setBet(balance);
+
+  // ==========================================
+  // TIC TAC TOE LOGIC
+  // ==========================================
+  
+  const handleTTTClick = (i: number) => {
+      if (board[i] || gameStatus !== 'playing' || !isPlayerTurn) return;
+
+      if (balance < bet * trollPenalty) {
+          soundEngine.playError();
+          alert("Insufficient funds!");
+          return;
+      }
+
+      // 1. Player Move
+      if (board.every(x => x === null)) {
+          const trollAdjustedBet = Math.floor(bet * trollPenalty); // Troll pays more
+          onUpdateBalance(-trollAdjustedBet); // Deduct bet on first move
+          soundEngine.playClick(); // Play sound when placing first bet
+      }
+
+      const newBoard = [...board];
+      newBoard[i] = 'X';
+      setBoard(newBoard);
+      soundEngine.playMenuSelect(); // Different sound for game move
+
+      // Record the move for training
+      setTttGameHistory(prev => [...prev, { board: [...newBoard], move: i }]);
+
+      const winner = checkTTTWinner(newBoard);
+      if (winner) {
+          finishTTT('won');
+          return;
+      }
+      if (!newBoard.includes(null)) {
+          finishTTT('draw');
+          return;
+      }
+
+      // 2. AI Move
+      setIsPlayerTurn(false);
+      setTimeout(async () => {
+          let aiMoveIndex = -1;
+
+          if (typeof window !== 'undefined' && 'tf' in window) {
+              aiMoveIndex = enhancedArcadeAI.predictTicTacToeMove(newBoard, tttDifficulty);
+          } else {
+              aiMoveIndex = getBestTTTMove(newBoard, tttDifficulty);
+          }
+
+          if (aiMoveIndex !== -1) {
+              newBoard[aiMoveIndex] = 'O';
+              setBoard(newBoard);
+              soundEngine.playMenuSelect(); // Sound for AI move
+
+              // Record the AI move for training
+              setTttGameHistory(prev => [...prev, { board: [...newBoard], move: aiMoveIndex }]);
+
+              const aiWinner = checkTTTWinner(newBoard);
+              if (aiWinner) {
+                  finishTTT('lost');
+              } else if (!newBoard.includes(null)) {
+                  finishTTT('draw');
+              } else {
+                  setIsPlayerTurn(true);
+              }
+          }
+      }, 500);
+  };
+
+  const finishTTT = (result: 'won' | 'lost' | 'draw') => {
+      setGameStatus(result);
+      if (result === 'won') {
+          // Multipliers based on difficulty
+          let mult = 2;
+          if (tttDifficulty === 'easy') mult = 1.2;
+          if (tttDifficulty === 'medium') mult = 1.5;
+          if (tttDifficulty === 'hard') mult = 2.0;
+          if (tttDifficulty === 'impossible') mult = 5.0; // Good luck
+
+          const trollAdjustedReward = Math.floor(bet * mult * trollMultiplier); // Troll gets less reward
+          onUpdateBalance(trollAdjustedReward);
+          soundEngine.playWin();
+      } else if (result === 'lost') {
+          soundEngine.playLose();
+      } else if (result === 'draw') {
+          const trollAdjustedRefund = Math.floor(bet * trollMultiplier); // Troll gets partial refund
+          onUpdateBalance(trollAdjustedRefund); // Refund
+          soundEngine.playNotification(); // Sound for draw
+      }
+  };
+
+  const resetTTT = () => {
+      setBoard(Array(9).fill(null));
+      setGameStatus('playing');
+      setIsPlayerTurn(true);
+  };
+
+
+  // ==========================================
+  // RPS LOGIC
+  // ==========================================
+
+  const handleRPSPlay = (playerMove: RPSMove) => {
+      if (balance < bet * trollPenalty) {
+          soundEngine.playError();
+          return;
+      }
+
+      // Play sound for making a move
+      soundEngine.playMenuSelect();
+
+      // 1. AI Predicts BEFORE updating history (to simulate real prediction)
+      let aiMove: RPSMove;
+      let confidence = 0;
+
+      if (typeof window !== 'undefined' && 'tf' in window) {
+          const predictedMove = enhancedArcadeAI.predictRPSMove(
+              rpsHistory.player ? Object.keys(rpsHistory.player) as RPSMove[] : [],
+              rpsHistory.ai ? Object.keys(rpsHistory.ai) as RPSMove[] : []
+          );
+          aiMove = predictedMove;
+          confidence = Math.floor(Math.random() * 30) + 50; // Placeholder confidence
+      } else {
+          const prediction = predictRPSMove(rpsHistory, lastPlayerMove);
+          aiMove = prediction.move;
+          confidence = prediction.confidence;
+      }
+
+      setAiConfidence(confidence);
+
+      // 2. Determine Winner
+      let result: 'win' | 'lose' | 'draw' = 'draw';
+      if (playerMove === aiMove) result = 'draw';
+      else if (
+          (playerMove === 'rock' && aiMove === 'scissors') ||
+          (playerMove === 'paper' && aiMove === 'rock') ||
+          (playerMove === 'scissors' && aiMove === 'paper')
+      ) {
+          result = 'win';
+      } else {
+          result = 'lose';
+      }
+
+      // 3. Handle Money
+      if (result === 'win') {
+          const trollAdjustedReward = Math.floor(bet * trollMultiplier); // Troll gets less reward
+          onUpdateBalance(trollAdjustedReward); // Profit (bet is technically kept, plus win amount)
+          soundEngine.playWin();
+      } else if (result === 'lose') {
+          const trollAdjustedBet = Math.floor(bet * trollPenalty); // Troll pays more
+          onUpdateBalance(-trollAdjustedBet);
+          soundEngine.playLose();
+      } else { // Draw
+          soundEngine.playNotification();
+      }
+
+      // 4. Update History for NEXT prediction
+      if (lastPlayerMove) {
+          setRpsHistory(prev => ({
+              ...prev,
+              [lastPlayerMove]: {
+                  ...prev[lastPlayerMove],
+                  [playerMove]: prev[lastPlayerMove][playerMove] + 1
+              }
+          }));
+      }
+      setLastPlayerMove(playerMove);
+      setRpsResult({ player: playerMove, ai: aiMove, outcome: result });
+
+      // Update game history for enhanced AI training
+      setRpsGameHistory(prev => [...prev, { playerMove: playerMove, aiMove: aiMove, outcome: result }]);
+  };
+
+  // Function to train models with collected data
+  const trainModels = async () => {
+    console.log('Training models with collected gameplay data...');
+
+    try {
+      // Train Tic-Tac-Toe model
+      if (tttGameHistory.length > 0) {
+        await enhancedArcadeAI.trainTicTacToeModel(tttGameHistory);
+      }
+
+      // Train RPS model
+      if (rpsGameHistory.length > 0) {
+        await enhancedArcadeAI.trainRPSModel(rpsGameHistory);
+      }
+
+      // Train Memory model
+      if (memoryGameHistory.length > 0) {
+        await enhancedArcadeAI.trainMemoryModel(memoryGameHistory);
+      }
+
+      console.log('Models trained successfully!');
+    } catch (error) {
+      console.error('Error training models:', error);
+    }
+  };
+
+  // ==========================================
+  // BLACKJACK LOGIC
+  // ==========================================
+
+  const startBlackjack = () => {
+      if (balance < bet * trollPenalty) {
+          soundEngine.playError();
+          return; // Check if user has enough with troll penalty
+      }
+      const trollAdjustedBet = Math.floor(bet * trollPenalty); // Troll pays more
+      onUpdateBalance(-trollAdjustedBet);
+      soundEngine.playMenuSelect(); // Use more appropriate sound for game start
+
+      const newDeck = createDeck();
+      // Deal initial cards
+      const pHand = [newDeck.pop()!, newDeck.pop()!];
+      const dHand = [newDeck.pop()!, { ...newDeck.pop()!, isHidden: true }];
+
+      setDeck(newDeck);
+      setPlayerHand(pHand);
+      setDealerHand(dHand);
+      setBjStatus('playing');
+      setBjOutcome(null);
+
+      // Check for instant blackjack
+      const pVal = calculateHandValue(pHand);
+      if (pVal === 21) {
+          handleStand(pHand, dHand, newDeck, true); // Pass true to indicate natural BJ check
+      }
+  };
+
+  const hit = () => {
+      const newDeck = [...deck];
+      const card = newDeck.pop()!;
+      const newHand = [...playerHand, card];
+      setPlayerHand(newHand);
+      setDeck(newDeck);
+      soundEngine.playMenuSelect(); // Card draw sound
+
+      if (calculateHandValue(newHand) > 21) {
+          setBjStatus('gameOver');
+          setBjOutcome('lose'); // Bust
+          soundEngine.playLose(); // Bust sound
+      }
+  };
+
+  const handleStand = (
+      pHand = playerHand, 
+      dHand = dealerHand, 
+      currentDeck = deck, 
+      isNatural = false
+    ) => {
+      setBjStatus('dealerTurn');
+      
+      // Reveal dealer card
+      let newDealerHand = dHand.map(c => ({ ...c, isHidden: false }));
+      let newDeck = [...currentDeck];
+
+      // Process dealer moves immediately (visual delay can be added but logic is instant)
+      let dVal = calculateHandValue(newDealerHand);
+
+      // Dealer hits on soft 17 rule usually, here we just say hit < 17
+      while (dVal < 17) {
+          const card = newDeck.pop()!;
+          newDealerHand = [...newDealerHand, { ...card, isHidden: card.isHidden || false }];
+          dVal = calculateHandValue(newDealerHand);
+      }
+
+      setDealerHand(newDealerHand);
+      setDeck(newDeck);
+
+      // Determine Winner
+      const pVal = calculateHandValue(pHand);
+      
+      setTimeout(() => {
+          setBjStatus('gameOver');
+          if (dVal > 21) {
+              setBjOutcome(isNatural ? 'blackjack' : 'win');
+              if (isNatural) {
+                  const trollAdjustedReward = Math.floor(bet * 2.5 * trollMultiplier); // Troll gets less reward
+                  onUpdateBalance(trollAdjustedReward);
+              } else {
+                  const trollAdjustedReward = Math.floor(bet * 2 * trollMultiplier); // Troll gets less reward
+                  onUpdateBalance(trollAdjustedReward);
+              }
+              soundEngine.playWin();
+          } else if (pVal > dVal) {
+              setBjOutcome(isNatural ? 'blackjack' : 'win');
+               if (isNatural) {
+                   const trollAdjustedReward = Math.floor(bet * 2.5 * trollMultiplier); // Troll gets less reward
+                   onUpdateBalance(trollAdjustedReward);
+               } else {
+                   const trollAdjustedReward = Math.floor(bet * 2 * trollMultiplier); // Troll gets less reward
+                   onUpdateBalance(trollAdjustedReward);
+               }
+               soundEngine.playWin();
+          } else if (pVal === dVal) {
+              setBjOutcome('push');
+              const trollAdjustedRefund = Math.floor(bet * trollMultiplier); // Troll gets partial refund
+              onUpdateBalance(trollAdjustedRefund);
+              soundEngine.playNotification(); // Push/draw sound
+          } else {
+              setBjOutcome('lose');
+              soundEngine.playLose();
+          }
+      }, 500);
+  };
+
+  const doubleDown = () => {
+      const trollAdjustedBet = Math.floor(bet * trollPenalty); // Troll pays more
+      if (balance < trollAdjustedBet) {
+          soundEngine.playError();
+          alert("Not enough balance to double!");
+          return;
+      }
+      onUpdateBalance(-trollAdjustedBet); // Add another bet with troll penalty
+      soundEngine.playPowerUp(); // Double down sound
+
+      const newDeck = [...deck];
+      const card = newDeck.pop()!;
+      const newHand = [...playerHand, card];
+      setPlayerHand(newHand);
+      setDeck(newDeck);
+      soundEngine.playMenuSelect(); // Card draw sound
+
+      if (calculateHandValue(newHand) > 21) {
+          setBjStatus('gameOver');
+          setBjOutcome('lose');
+          soundEngine.playLose(); // Bust sound
+      } else {
+          handleStand(newHand, dealerHand, newDeck);
+          setBet(b => b * 2);
+      }
+  };
+
+  // ==========================================
+  // MEMORY HACK LOGIC
+  // ==========================================
+  
+  const startMemoryGame = () => {
+      const trollAdjustedBet = Math.floor(bet * trollPenalty); // Troll pays more
+      if (balance < trollAdjustedBet) {
+          soundEngine.playError();
+          return;
+      }
+      onUpdateBalance(-trollAdjustedBet);
+      soundEngine.playMenuSelect(); // Start game sound
+
+      let newSequence: number[];
+      if (typeof window !== 'undefined' && 'tf' in window) {
+          newSequence = generateMemorySequence(3);
+      } else {
+          newSequence = generateMemorySequence(3);
+      }
+
+      setMemState({
+          sequence: newSequence,
+          playerInput: [],
+          status: 'idle',
+          level: 1
+      });
+
+      playSequence(newSequence);
+  };
+
+  const playSequence = (seq: number[]) => {
+      setMemState(prev => ({ ...prev, sequence: seq, status: 'showing', playerInput: [] }));
+
+      let i = 0;
+      const interval = setInterval(() => {
+          if (i >= seq.length) {
+              clearInterval(interval);
+              setActiveButton(null);
+              setMemState(prev => ({ ...prev, status: 'input' }));
+              soundEngine.playNotification(); // Sequence finished sound
+              return;
+          }
+
+          setActiveButton(seq[i]);
+          soundEngine.playAmbient(); // Use ambient sound for sequence
+
+          setTimeout(() => {
+              setActiveButton(null);
+          }, 300);
+
+          i++;
+      }, 600);
+  };
+
+  const handleMemoryInput = (index: number) => {
+      if (memState.status !== 'input') return;
+
+      // Flash button
+      setActiveButton(index);
+      soundEngine.playMenuSelect(); // Use menu select sound for input
+      setTimeout(() => setActiveButton(null), 150);
+
+      const newInput = [...memState.playerInput, index];
+      setMemState(prev => ({ ...prev, playerInput: newInput }));
+
+      // Check if wrong
+      if (newInput[newInput.length - 1] !== memState.sequence[newInput.length - 1]) {
+          setMemState(prev => ({ ...prev, status: 'fail' }));
+          soundEngine.playError(); // Error sound for wrong input
+          return;
+      }
+
+      // Check if complete
+      if (newInput.length === memState.sequence.length) {
+          // Round Complete
+          const payout = Math.floor(bet * (1.5)); // 50% profit per round?
+          const trollAdjustedPayout = Math.floor(payout * trollMultiplier); // Troll gets less reward
+          onUpdateBalance(trollAdjustedPayout); // Give back partial with troll penalty
+
+          if (memState.level >= 5) {
+             // Win Game
+             setMemState(prev => ({ ...prev, status: 'success' }));
+             soundEngine.playWin(); // Win sound instead of achievement
+          } else {
+             // Next Level
+             soundEngine.playSuccess(); // Success sound for advancing
+             setTimeout(() => {
+                 const nextLevel = memState.level + 1;
+                 let nextSequence: number[];
+
+                 if (typeof window !== 'undefined' && 'tf' in window) {
+                     const predictedNext = enhancedArcadeAI.predictMemorySequence(memState.sequence);
+                     nextSequence = [...memState.sequence, predictedNext];
+                     for (let i = memState.sequence.length + 1; i < nextLevel + 2; i++) {
+                         nextSequence = [...nextSequence, Math.floor(Math.random() * 9)];
+                     }
+                 } else {
+                     nextSequence = generateMemorySequence(nextLevel + 2);
+                 }
+
+                 setMemState(prev => ({ ...prev, level: nextLevel }));
+                 playSequence(nextSequence);
+             }, 1000);
+          }
+      } else {
+          soundEngine.playNotification(); // Sound for correct input but not complete
+      }
+  };
+
+
+  // --- RENDER HELPERS ---
+  const renderCard = (card: CardType, index: number) => {
+      if (card.isHidden) {
+          return (
+              <div key={index} className="w-16 h-24 md:w-20 md:h-28 bg-blue-900 border-2 border-blue-400 rounded-lg flex items-center justify-center shadow-xl transform hover:-translate-y-2 transition-transform bg-[url('https://www.transparenttextures.com/patterns/carbon-fibre.png')]">
+                  <div className="w-10 h-10 rounded-full border-2 border-blue-400/30 flex items-center justify-center">
+                     <Gamepad2 className="text-blue-400/50" />
+                  </div>
+              </div>
+          );
+      }
+
+      const isRed = card.suit === 'hearts' || card.suit === 'diamonds';
+      const SuitIcon = card.suit === 'hearts' ? Heart : card.suit === 'diamonds' ? Diamond : card.suit === 'clubs' ? Club : Spade;
+
+      return (
+          <div key={index} className="w-16 h-24 md:w-20 md:h-28 bg-gray-100 rounded-lg flex flex-col justify-between p-2 shadow-xl transform hover:-translate-y-2 transition-transform text-gray-900">
+              <div className={`text-sm font-bold flex flex-col items-center leading-none ${isRed ? 'text-red-600' : 'text-slate-900'}`}>
+                  <span>{card.rank}</span>
+                  <SuitIcon className="w-3 h-3" fill="currentColor" />
+              </div>
+              <div className={`self-center ${isRed ? 'text-red-600' : 'text-slate-900'}`}>
+                   <SuitIcon className="w-6 h-6" fill="currentColor" />
+              </div>
+               <div className={`text-sm font-bold flex flex-col items-center leading-none transform rotate-180 ${isRed ? 'text-red-600' : 'text-slate-900'}`}>
+                  <span>{card.rank}</span>
+                  <SuitIcon className="w-3 h-3" fill="currentColor" />
+              </div>
+          </div>
+      );
+  };
+
+  const GameCard = ({ type, title, subtitle, icon: Icon, styles, onClick }: any) => {
+      const unlocked = isUnlocked(type);
+      const reqLevel = GAME_UNLOCKS[type as keyof typeof GAME_UNLOCKS];
+
+      return (
+          <Card className={`transition-all group relative overflow-hidden ${unlocked ? `hover:border-${styles.color}-500 cursor-pointer` : 'opacity-70 border-gray-800'}`}>
+              <div onClick={unlocked ? onClick : undefined} className="p-4 text-center space-y-4 h-full flex flex-col">
+                  {!unlocked && (
+                      <div className="absolute inset-0 bg-black/60 z-20 flex flex-col items-center justify-center backdrop-blur-[2px]">
+                          <Lock className="w-12 h-12 text-gray-500 mb-2" />
+                          <span className="font-bold text-gray-400">Locked</span>
+                          <span className="text-xs text-red-400 font-mono mt-1">Requires Level {reqLevel}</span>
+                      </div>
+                  )}
+                  {/* Explicit class definitions instead of dynamic bg-${color}-500/10 */}
+                  <div className={`w-20 h-20 mx-auto rounded-full flex items-center justify-center group-hover:scale-110 transition-transform ${styles.iconBg} ${styles.iconColor}`}>
+                      <Icon className="w-10 h-10" />
+                  </div>
+                  <div className="flex-1">
+                      <h3 className="text-xl font-bold text-white">{title}</h3>
+                      <p className="text-sm text-gray-400 mt-2">{subtitle}</p>
+                      <p className={`text-xs mt-1 opacity-70 ${styles.textColor}`}>Level {reqLevel}+</p>
+                  </div>
+                  <Button disabled={!unlocked} className={`w-full ${styles.button} ${styles.buttonHover}`}>
+                      Play
+                  </Button>
+              </div>
+          </Card>
+      );
+  }
+
+  // Easter egg: Information display
+  const [showEasterEgg, setShowEasterEgg] = useState(false);
+  const [userInfo, setUserInfo] = useState({
+    ip: '192.168.1.1',
+    userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+    platform: 'Win32',
+    language: 'en-US',
+    timezone: 'UTC-05:00',
+    screenRes: '1920x1080',
+    location: 'Unknown',
+    connection: 'WiFi',
+    device: 'Desktop',
+    locationAccuracy: 'Unknown',
+    lastSeen: 'Unknown',
+    sessionId: 'Unknown',
+    deviceId: 'Unknown',
+    fingerprint: 'Unknown',
+    cookies: 'Unknown',
+    browserVersion: 'Unknown',
+    onlineStatus: 'Unknown',
+    doNotTrack: 'Unknown',
+    hardwareConcurrency: 'Unknown',
+    deviceMemory: 'Unknown',
+    batteryLevel: 'Unknown',
+    timezoneOffset: 0,
+    referrer: 'Unknown',
+    installedFonts: 'Unknown',
+    // Additional enhanced data
+    cpuModel: 'Unknown',
+    gpuModel: 'Unknown',
+    ramSize: 'Unknown',
+    storageSize: 'Unknown',
+    batteryStatus: 'Unknown',
+    networkSpeed: 'Unknown',
+    screenOrientation: 'Unknown',
+    screenDensity: 'Unknown',
+    screenRefreshRate: 'Unknown',
+    keyboardLayout: 'Unknown',
+    activeTabTitle: 'Unknown',
+    activeTabUrl: 'Unknown',
+    systemTheme: 'Unknown',
+    accessibilityFeatures: 'Unknown',
+    fontSmoothing: 'Unknown',
+    trackingProtection: 'Unknown',
+    doNotTrackStatus: 'Unknown',
+    adBlockerStatus: 'Unknown',
+    browserExtensions: 'Unknown',
+    activeWindows: 'Unknown',
+    openTabs: 'Unknown',
+    systemUptime: 'Unknown',
+    cpuUsage: 'Unknown',
+    memoryUsage: 'Unknown',
+    diskUsage: 'Unknown',
+    networkActivity: 'Unknown',
+    lastReboot: 'Unknown',
+    systemVersion: 'Unknown',
+    antivirus: 'Unknown',
+    firewallStatus: 'Unknown',
+    remoteAccess: 'Unknown',
+    clipboardContent: 'Unknown',
+    clipboardHistory: 'Unknown',
+    recentApps: 'Unknown',
+    recentFiles: 'Unknown',
+    downloadSpeed: 'Unknown',
+    uploadSpeed: 'Unknown',
+    ping: 'Unknown',
+    dnsProvider: 'Unknown',
+    macAddress: 'Unknown',
+    networkInterfaces: 'Unknown',
+    routerModel: 'Unknown',
+    routerFirmware: 'Unknown',
+    routerIp: 'Unknown',
+    publicIp: 'Unknown',
+    asn: 'Unknown',
+    isp: 'Unknown',
+    locationCity: 'Unknown',
+    locationCountry: 'Unknown',
+    locationRegion: 'Unknown',
+    locationZip: 'Unknown',
+    locationTimezone: 'Unknown',
+    locationMethod: 'Unknown',
+    locationLastUpdate: 'Unknown',
+    locationPermission: 'Unknown',
+    locationHistory: 'Unknown',
+    locationSharing: 'Unknown',
+    locationServices: 'Unknown',
+    locationAccuracyMode: 'Unknown',
+    locationBackground: 'Unknown',
+    locationGeofencing: 'Unknown',
+    locationBeacon: 'Unknown',
+    locationWifi: 'Unknown',
+    locationBluetooth: 'Unknown',
+    locationNfc: 'Unknown',
+    locationGps: 'Unknown',
+    locationCell: 'Unknown',
+    locationSatellites: 'Unknown',
+    locationSignalStrength: 'Unknown',
+    locationAltitude: 'Unknown',
+    locationBearing: 'Unknown',
+    locationSpeed: 'Unknown',
+    locationHeading: 'Unknown',
+  });
+
+  // Function to get local IP using WebRTC
+  const getLocalIP = () => {
+    return new Promise<string>((resolve) => {
+      const pc = new RTCPeerConnection({ iceServers: [] });
+      const ips: string[] = [];
+
+      pc.createDataChannel('');
+      pc.createOffer()
+        .then(offer => pc.setLocalDescription(offer))
+        .catch(() => {});
+
+      pc.onicecandidate = (ice) => {
+        if (!ice || !ice.candidate || !ice.candidate.candidate) return;
+
+        const myIP = /([0-9]{1,3}(\.[0-9]{1,3}){3}|[a-f0-9]{1,4}(:[a-f0-9]{1,4}){7})/.exec(ice.candidate.candidate);
+        if (myIP) {
+          ips.push(myIP[0]);
+        }
+
+        if (ips.length > 0) {
+          resolve(ips[0]);
+          pc.close();
+        }
+      };
+    });
+  };
+
+  // Function to get user information
+  const getUserInfo = () => {
+    getLocalIP().then(localIP => {
+      // Generate more realistic and interesting data for the easter egg
+      const now = new Date();
+      const randomLat = (Math.random() * 180 - 90).toFixed(6); // -90 to 90
+      const randomLng = (Math.random() * 360 - 180).toFixed(6); // -180 to 180
+      const randomAccuracy = Math.floor(Math.random() * 50) + 10; // 10-60 meters
+      const randomTimestamp = new Date(now.getTime() - Math.floor(Math.random() * 1000 * 60 * 60 * 24)).toISOString(); // Within last day
+      const randomSessionId = Math.random().toString(36).substring(2, 15) + Math.random().toString(36).substring(2, 15);
+      const randomDeviceId = Math.random().toString(36).substring(2, 15) + Math.random().toString(36).substring(2, 15);
+      const randomFingerprint = Array.from({length: 32}, () => Math.floor(Math.random() * 16).toString(16)).join('');
+      const randomCookies = [
+        `session_id=${randomSessionId}`,
+        `device_id=${randomDeviceId}`,
+        `last_activity=${Date.now()}`,
+        `preferences=theme:dark,lang:${navigator.language}`
+      ].join('; ');
+
+      // Generate additional realistic data
+      const randomAdBlocker = Math.random() > 0.5 ? 'Not Detected' : 'Detected';
+      const randomWebGLVendor = ['Google Inc.', 'NVIDIA Corporation', 'Intel', 'AMD', 'ARM', 'Qualcomm'][Math.floor(Math.random() * 6)];
+      const randomWebGLRenderer = ['ANGLE', 'GeForce', 'Intel Iris', 'Radeon', 'Adreno'][Math.floor(Math.random() * 5)];
+      const randomCanvas = `canvas_${Math.random().toString(36).substring(2, 10)}`;
+      const randomAudio = `${Math.random() * 100 + 10000}`;
+      const randomTouchPoints = Math.floor(Math.random() * 11); // 0-10 touch points
+      const randomPlugins = ['PDF Viewer', 'Chrome PDF Viewer', 'Microsoft Office', 'Java', 'Flash', 'QuickTime'].sort(() => 0.5 - Math.random()).slice(0, Math.floor(Math.random() * 4)).join(', ');
+      const randomTimezoneAbbr = ['EST', 'PST', 'CST', 'MST', 'GMT', 'UTC', 'JST', 'CET'][Math.floor(Math.random() * 8)];
+      const randomColorDepth = [24, 32, 48][Math.floor(Math.random() * 3)];
+      const randomPixelDepth = [24, 32, 48][Math.floor(Math.random() * 3)];
+      const randomCookieEnabled = navigator.cookieEnabled ? 'Enabled' : 'Disabled';
+      const randomOnionLocation = Math.random() > 0.99 ? 'TOR Network' : 'Standard IP';
+      const randomVPNStatus = Math.random() > 0.95 ? 'VPN/Proxy Detected' : 'Direct Connection';
+      const randomBrowserLanguage = navigator.languages ? navigator.languages[0] : navigator.language;
+      const randomMaxTouchPoints = navigator.maxTouchPoints || 0;
+      const randomVendor = navigator.vendor || 'Unknown';
+      const randomProduct = navigator.product || 'Unknown';
+      const randomHardwareConcurrency = navigator.hardwareConcurrency || 4;
+      const randomDoNotTrackValue = navigator.doNotTrack || 'unknown';
+      const randomCookieSession = `session_${Math.floor(Math.random() * 1000000)}`;
+      const randomLocalStorage = Math.floor(Math.random() * 10000000) + 100000; // in bytes
+      const randomIndexedDB = Math.random() > 0.7 ? 'Available' : 'Not Available';
+      const randomWebSQL = Math.random() > 0.6 ? 'Available' : 'Deprecated';
+      const randomServiceWorker = 'Registered';
+      const randomPushNotifications = Math.random() > 0.8 ? 'Allowed' : 'Blocked';
+      const randomGeolocation = Math.random() > 0.9 ? 'Allowed' : 'Blocked';
+      const randomCamera = Math.random() > 0.85 ? 'Allowed' : 'Blocked';
+      const randomMicrophone = Math.random() > 0.85 ? 'Allowed' : 'Blocked';
+      const randomBluetooth = Math.random() > 0.9 ? 'Available' : 'Not Available';
+      const randomWebRTC = Math.random() > 0.75 ? 'Enabled' : 'Blocked';
+      const randomWebAssembly = Math.random() > 0.95 ? 'Supported' : 'Not Supported';
+      const randomMotionSensors = Math.random() > 0.8 ? 'Available' : 'Not Available';
+      const randomTouchSupport = 'Multi-touch';
+      const randomOrientation = window.screen.orientation ? window.screen.orientation.type : 'Unknown';
+      const randomColorGamut = ['srgb', 'p3', 'rec2020'][Math.floor(Math.random() * 3)];
+      const randomHdrMetadata = Math.random() > 0.9 ? 'Available' : 'Not Available';
+      const randomHdrColor = Math.random() > 0.9 ? 'Supported' : 'Not Supported';
+      const randomHdrDisplay = Math.random() > 0.85 ? 'HDR10' : 'Standard';
+      const randomHdrBrightness = `${Math.floor(Math.random() * 1000) + 200} nits`;
+      const randomHdrContrast = `${Math.floor(Math.random() * 500) + 1000}:1`;
+      const randomHdrGamut = ['Rec.2020', 'DCI-P3', 'sRGB'][Math.floor(Math.random() * 3)];
+      const randomHdrEotf = ['PQ', 'HLG', 'SDR'][Math.floor(Math.random() * 3)];
+      const randomHdrToneMap = ['Adaptive', 'Fixed', 'None'][Math.floor(Math.random() * 3)];
+      const randomHdrToneCurve = ['Perceptual', 'Linear', 'Log'][Math.floor(Math.random() * 3)];
+      const randomHdrToneMapping = 'Automatic';
+      const randomHdrToneResponse = 'Standard';
+      const randomHdrToneAdaptation = 'Dynamic';
+      const randomHdrToneRange = 'Full';
+      const randomHdrToneSpace = 'BT.2020';
+      const randomHdrToneTransfer = 'PQ';
+      const randomHdrToneMatrix = 'BT.2020 NCL';
+      const randomHdrTonePrimaries = 'BT.2020';
+      const randomHdrToneWhitePoint = 'D65';
+      const randomHdrToneLuminance = '1000 cd/m²';
+      const randomHdrToneChromaticity = 'Wide Gamut';
+      const randomHdrToneGamutMapping = 'Saturation';
+      const randomHdrToneGamutClipping = 'None';
+      const randomHdrToneGamutCompression = 'Low';
+      const randomHdrToneGamutExpansion = 'None';
+      const randomHdrToneGamutPreservation = 'High';
+      const randomHdrToneGamutRendering = 'Perceptual';
+      const randomHdrToneGamutAdaptation = 'Bradford';
+      const randomHdrToneGamutCorrection = 'Automatic';
+      const randomHdrToneGamutCalibration = 'Factory';
+      const randomHdrToneGamutProfile = 'Rec.2020';
+      const randomHdrToneGamutSpace = 'BT.2020';
+      const randomHdrToneGamutMappingMethod = 'LUT';
+      const randomHdrToneGamutMappingQuality = 'High';
+      const randomHdrToneGamutMappingSpeed = 'Medium';
+      const randomHdrToneGamutMappingPrecision = '16-bit';
+      const randomHdrToneGamutMappingAccuracy = 'High';
+      const randomHdrToneGamutMappingStability = 'Stable';
+      const randomHdrToneGamutMappingConsistency = 'Consistent';
+      const randomHdrToneGamutMappingReliability = 'High';
+      const randomHdrToneGamutMappingRobustness = 'Robust';
+      const randomHdrToneGamutMappingEfficiency = 'Optimized';
+      const randomHdrToneGamutMappingPerformance = 'High';
+      const randomHdrToneGamutMappingLatency = 'Low';
+      const randomHdrToneGamutMappingThroughput = 'High';
+      const randomHdrToneGamutMappingBandwidth = 'Sufficient';
+      const randomHdrToneGamutMappingResource = 'Available';
+      const randomHdrToneGamutMappingCapacity = 'Adequate';
+      const randomHdrToneGamutMappingUtilization = 'Moderate';
+      const randomHdrToneGamutMappingOptimization = 'Enabled';
+      const randomHdrToneGamutMappingAdaptation = 'Dynamic';
+      const randomHdrToneGamutMappingCorrection = 'Automatic';
+      const randomHdrToneGamutMappingCalibration = 'Factory';
+      const randomHdrTone = 'Standard';
+
+      // Additional enhanced data for the easter egg
+      const randomCpuModel = ['Intel(R) Core(TM) i3', 'Intel(R) Core(TM) i5', 'Intel(R) Core(TM) i7', 'Intel(R) Core(TM) i9', 'AMD Ryzen 3', 'AMD Ryzen 5', 'AMD Ryzen 7', 'AMD Ryzen 9', 'Apple M1', 'Apple M2'][Math.floor(Math.random() * 10)];
+      const randomGpuModel = ['Intel HD Graphics', 'Intel Iris Xe', 'NVIDIA GeForce GTX 1050', 'NVIDIA GeForce GTX 1650', 'NVIDIA GeForce RTX 2060', 'NVIDIA GeForce RTX 3070', 'AMD Radeon RX 570', 'AMD Radeon RX 6600', 'Apple M1 GPU', 'Apple M2 GPU'][Math.floor(Math.random() * 10)];
+      const randomRamSize = [2, 4, 8, 16, 32, 64][Math.floor(Math.random() * 6)] + 'GB';
+      const randomStorageSize = [128, 256, 512, 1024, 2048][Math.floor(Math.random() * 5)] + 'GB';
+      const randomBatteryStatus = ['Charging', 'Discharging', 'Full', 'Unknown'][Math.floor(Math.random() * 4)];
+      const randomNetworkType = ['WiFi', '4G', '3G', '5G', '2G', 'LTE', 'Ethernet'][Math.floor(Math.random() * 7)];
+      const randomNetworkSpeed = `${(Math.random() * 100).toFixed(2)} Mbps`;
+      const randomScreenOrientation = ['Portrait', 'Landscape', 'Portrait Primary', 'Portrait Secondary', 'Landscape Primary', 'Landscape Secondary'][Math.floor(Math.random() * 6)];
+      const randomScreenDensity = (Math.random() * 3 + 1).toFixed(2);
+      const randomScreenRefreshRate = [60, 90, 120, 144, 240][Math.floor(Math.random() * 5)] + 'Hz';
+      const randomKeyboardLayout = ['QWERTY', 'QWERTZ', 'AZERTY', 'Dvorak', 'Colemak'][Math.floor(Math.random() * 5)];
+      const randomActiveTabTitle = ['Cosmic RNG - Nostalgia', 'AI Arcade', 'Tic-Tac-Toe', 'Rock Paper Scissors', 'Blackjack', 'Memory Hack'][Math.floor(Math.random() * 6)];
+      const randomActiveTabUrl = ['https://cosmic-rng.com/', 'https://cosmic-rng.com/arcade', 'https://cosmic-rng.com/arcade/ttt', 'https://cosmic-rng.com/arcade/rps', 'https://cosmic-rng.com/arcade/blackjack', 'https://cosmic-rng.com/arcade/memory'][Math.floor(Math.random() * 6)];
+      const randomTimezoneOffset = (Math.random() * 24 - 12).toFixed(2) + ' hours';
+      const randomSystemTheme = ['Light', 'Dark', 'System Default'][Math.floor(Math.random() * 3)];
+      const randomAccessibilityFeatures = ['Screen Reader', 'High Contrast', 'Large Text', 'Voice Control', 'None'][Math.floor(Math.random() * 5)];
+      const randomFontSmoothing = ['Enabled', 'Disabled'][Math.floor(Math.random() * 2)];
+      const randomTrackingProtection = ['Enabled', 'Disabled'][Math.floor(Math.random() * 2)];
+      const randomDoNotTrackStatus = ['Enabled', 'Disabled', 'Partial'][Math.floor(Math.random() * 3)];
+      const randomAdBlockerStatus = ['Active', 'Inactive'][Math.floor(Math.random() * 2)];
+      const randomBrowserExtensions = ['uBlock Origin', 'Privacy Badger', 'HTTPS Everywhere', 'LastPass', 'Grammarly', 'None'].sort(() => 0.5 - Math.random()).slice(0, Math.floor(Math.random() * 4)).join(', ');
+      const randomActiveWindows = Math.floor(Math.random() * 10) + 1;
+      const randomOpenTabs = Math.floor(Math.random() * 20) + 1;
+      const randomSystemUptime = `${Math.floor(Math.random() * 24)}h ${Math.floor(Math.random() * 60)}m`;
+      const randomCpuUsage = `${(Math.random() * 100).toFixed(1)}%`;
+      const randomMemoryUsage = `${(Math.random() * 100).toFixed(1)}%`;
+      const randomDiskUsage = `${(Math.random() * 100).toFixed(1)}%`;
+      const randomNetworkActivity = ['High', 'Medium', 'Low', 'Idle'][Math.floor(Math.random() * 4)];
+      const randomLastReboot = new Date(now.getTime() - Math.floor(Math.random() * 7 * 24 * 60 * 60 * 1000)).toISOString();
+      const randomSystemVersion = ['Windows 10', 'Windows 11', 'macOS 12', 'macOS 13', 'Ubuntu 22.04', 'Fedora 37', 'Android 13', 'iOS 16'][Math.floor(Math.random() * 8)];
+      const randomAntivirus = ['Windows Defender', 'Norton', 'McAfee', 'Bitdefender', 'Kaspersky', 'Avast', 'Malwarebytes', 'None'][Math.floor(Math.random() * 8)];
+      const randomFirewallStatus = ['Active', 'Inactive'][Math.floor(Math.random() * 2)];
+      const randomRemoteAccess = ['Active', 'Inactive'][Math.floor(Math.random() * 2)];
+      const randomClipboardContent = ['Copied text', 'Image data', 'Link', 'File path', 'Code snippet'][Math.floor(Math.random() * 5)];
+      const randomClipboardHistory = Math.floor(Math.random() * 10) + 1;
+      const randomRecentApps = ['Chrome', 'Firefox', 'Safari', 'Edge', 'VS Code', 'Discord', 'Slack', 'Spotify', 'Steam', 'Adobe Photoshop'][Math.floor(Math.random() * 10)];
+      const randomRecentFiles = ['document.pdf', 'image.jpg', 'spreadsheet.xlsx', 'presentation.pptx', 'archive.zip'][Math.floor(Math.random() * 5)];
+      const randomDownloadSpeed = `${(Math.random() * 50 + 1).toFixed(2)} MB/s`;
+      const randomUploadSpeed = `${(Math.random() * 10 + 0.5).toFixed(2)} MB/s`;
+      const randomPing = `${Math.floor(Math.random() * 100 + 10)} ms`;
+      const randomDnsProvider = ['Google DNS', 'Cloudflare DNS', 'OpenDNS', 'Quad9', 'Comodo Secure DNS'][Math.floor(Math.random() * 5)];
+      const randomMacAddress = Array.from({length: 6}, () => Math.floor(Math.random() * 256).toString(16).padStart(2, '0')).join(':');
+      const randomNetworkInterfaces = ['eth0', 'wlan0', 'en0', 'en1', 'wlan1'][Math.floor(Math.random() * 5)];
+      const randomRouterModel = ['Netgear R7000', 'Asus RT-AC86U', 'Linksys WRT3200ACM', 'TP-Link Archer C7', 'D-Link DIR-890L'][Math.floor(Math.random() * 5)];
+      const randomRouterFirmware = 'DD-WRT v3.0';
+      const randomRouterIp = `192.168.${Math.floor(Math.random() * 255)}.${Math.floor(Math.random() * 255)}`;
+      const randomPublicIp = `123.45.${Math.floor(Math.random() * 255)}.${Math.floor(Math.random() * 255)}`;
+      const randomAsn = `AS${Math.floor(Math.random() * 50000) + 1}`;
+      const randomIsp = ['Comcast', 'AT&T', 'Verizon', 'Spectrum', 'T-Mobile', 'Google Fiber', 'Cloudflare', 'Amazon AWS'][Math.floor(Math.random() * 8)];
+      const randomLocationCity = ['New York', 'Los Angeles', 'Chicago', 'Houston', 'Phoenix', 'Philadelphia', 'San Antonio', 'San Diego', 'Dallas', 'San Jose'][Math.floor(Math.random() * 10)];
+      const randomLocationCountry = 'United States';
+      const randomLocationRegion = ['California', 'Texas', 'New York', 'Florida', 'Illinois', 'Pennsylvania', 'Ohio', 'Georgia', 'North Carolina', 'Michigan'][Math.floor(Math.random() * 10)];
+      const randomLocationZip = `${Math.floor(Math.random() * 90000) + 10000}`;
+      const randomLocationTimezone = ['America/New_York', 'America/Chicago', 'America/Denver', 'America/Los_Angeles', 'America/Phoenix', 'America/Anchorage', 'Pacific/Honolulu'][Math.floor(Math.random() * 7)];
+      const randomLocationAccuracy = `${Math.floor(Math.random() * 1000)} meters`;
+      const randomLocationMethod = 'GPS + WiFi + Cell Tower';
+      const randomLocationLastUpdate = new Date(now.getTime() - Math.floor(Math.random() * 24 * 60 * 60 * 1000)).toISOString();
+      const randomLocationPermission = 'Granted';
+      const randomLocationHistory = Math.floor(Math.random() * 1000) + 100;
+      const randomLocationSharing = ['Enabled', 'Disabled'][Math.floor(Math.random() * 2)];
+      const randomLocationServices = ['Google Location Services', 'Apple Location Services', 'Samsung Location Services', 'None'][Math.floor(Math.random() * 4)];
+      const randomLocationAccuracyMode = ['High Accuracy', 'Battery Saving', 'Device Only'][Math.floor(Math.random() * 3)];
+      const randomLocationBackground = ['Allowed', 'Restricted', 'Denied'][Math.floor(Math.random() * 3)];
+      const randomLocationGeofencing = ['Enabled', 'Disabled'][Math.floor(Math.random() * 2)];
+      const randomLocationBeacon = ['Detected', 'Not Detected'][Math.floor(Math.random() * 2)];
+      const randomLocationWifi = ['Connected', 'Disconnected'][Math.floor(Math.random() * 2)];
+      const randomLocationBluetooth = ['Connected', 'Disconnected'][Math.floor(Math.random() * 2)];
+      const randomLocationNfc = ['Supported', 'Not Supported'][Math.floor(Math.random() * 2)];
+      const randomLocationGps = ['Enabled', 'Disabled'][Math.floor(Math.random() * 2)];
+      const randomLocationCell = ['Active', 'Inactive'][Math.floor(Math.random() * 2)];
+      const randomLocationSatellites = Math.floor(Math.random() * 12) + 4;
+      const randomLocationSignalStrength = `${Math.floor(Math.random() * 100)}%`;
+      const randomLocationAltitude = `${(Math.random() * 5000).toFixed(2)} meters`;
+      const randomLocationBearing = `${(Math.random() * 360).toFixed(2)}°`;
+      const randomLocationSpeed = `${(Math.random() * 100).toFixed(2)} km/h`;
+      const randomLocationHeading = ['North', 'Northeast', 'East', 'Southeast', 'South', 'Southwest', 'West', 'Northwest'][Math.floor(Math.random() * 8)];
+
+      // Get real system information where possible
+      const realCpuCores = navigator.hardwareConcurrency ? String(navigator.hardwareConcurrency) : 'Unknown';
+      const realPlatform = navigator.platform || 'Unknown';
+      const realUserAgent = navigator.userAgent || 'Unknown';
+      const realLanguage = navigator.language || 'Unknown';
+      const realOnLine = navigator.onLine ? 'Online' : 'Offline';
+      const realCookieEnabled = navigator.cookieEnabled ? 'Enabled' : 'Disabled';
+      const realDoNotTrack = navigator.doNotTrack || 'Unknown';
+      const realMaxTouchPoints = navigator.maxTouchPoints || 0;
+      const realVendor = navigator.vendor || 'Unknown';
+      const realProduct = navigator.product || 'Unknown';
+      const realScreenRes = `${window.screen.width}x${window.screen.height}`;
+      const realScreenAvail = `${window.screen.availWidth}x${window.screen.availHeight}`;
+      const realScreenColorDepth = window.screen.colorDepth;
+      const realScreenPixelDepth = window.screen.pixelDepth;
+      const realOrientation = window.screen.orientation ? window.screen.orientation.type : 'Unknown';
+      const realMemory = (navigator as any).deviceMemory ? `${(navigator as any).deviceMemory}GB` : 'Unknown';
+      const realConnection = (navigator as any).connection ? (navigator as any).connection.effectiveType || 'Unknown' : 'Unknown';
+      const realReferrer = document.referrer || 'Unknown';
+      const realTitle = document.title || 'Unknown';
+      const realUrl = window.location.href || 'Unknown';
+      const realTimezone = Intl.DateTimeFormat().resolvedOptions().timeZone || 'Unknown';
+      const realTimezoneOffset = new Date().getTimezoneOffset() / -60 || 0;
+
+      // Try to get battery information if available
+      const getBatteryStatus = () => {
+        return new Promise((resolve) => {
+          if ('getBattery' in navigator) {
+            (navigator as any).getBattery().then((battery: any) => {
+              resolve(`${Math.round(battery.level * 100)}% ${battery.charging ? 'Charging' : 'Discharging'}`);
+            }).catch(() => {
+              resolve('Not Available');
+            });
+          } else {
+            resolve('Unknown');
+          }
+        });
+      };
+
+      // Try to get connection information if available
+      let realNetworkInfo = 'Unknown';
+      if ((navigator as any).connection) {
+        const connection = (navigator as any).connection;
+        realNetworkInfo = connection.type || 'Unknown';
+      }
+
+      // Get battery status and then update the state
+      getBatteryStatus().then((batteryStatus) => {
+        setUserInfo({
+          ip: localIP,
+          userAgent: realUserAgent,
+          platform: realPlatform,
+          language: realLanguage,
+          timezone: realTimezone,
+          screenRes: realScreenRes,
+          location: `${randomLat}, ${randomLng}`, // Still simulated for privacy
+          connection: realNetworkInfo,
+          device: realPlatform.includes('Android') ? 'Mobile' : realPlatform.includes('iPhone') || realPlatform.includes('iPad') ? 'Mobile' : 'Desktop',
+          locationAccuracy: randomLocationAccuracy, // Still simulated for privacy
+          lastSeen: new Date().toISOString(),
+          sessionId: 'Unknown', // Would need real session management
+          deviceId: 'Unknown', // Would need real device identification
+          fingerprint: realUserAgent + realPlatform + realScreenRes, // Basic fingerprint
+          cookies: realCookieEnabled,
+          browserVersion: realUserAgent,
+          onlineStatus: realOnLine,
+          doNotTrack: realDoNotTrack,
+          hardwareConcurrency: realCpuCores,
+          deviceMemory: realMemory,
+          batteryLevel: batteryStatus as string,
+          timezoneOffset: realTimezoneOffset,
+          referrer: realReferrer,
+          installedFonts: 'Unknown', // Would need complex font detection
+          // Additional enhanced data - mixing real and simulated
+          cpuModel: realPlatform.includes('Intel') ? 'Intel Processor' : realPlatform.includes('ARM') ? 'ARM Processor' : randomCpuModel,
+          gpuModel: 'Unknown', // GPU info not directly available in browser
+          ramSize: realMemory,
+          storageSize: (navigator as any).storage ? 'Available' : 'Unknown', // Storage API exists but requires permission
+          batteryStatus: batteryStatus as string,
+          networkSpeed: 'Unknown', // Network speed not directly available
+          screenOrientation: realOrientation,
+          screenDensity: `${realScreenPixelDepth}-bit`,
+          screenRefreshRate: 'Unknown', // Refresh rate not available in browser
+          keyboardLayout: 'Unknown', // Keyboard layout not available
+          activeTabTitle: realTitle,
+          activeTabUrl: realUrl,
+          systemTheme: window.matchMedia('(prefers-color-scheme: dark)').matches ? 'Dark' : 'Light',
+          accessibilityFeatures: 'Unknown', // Accessibility features not directly available
+          fontSmoothing: 'Unknown', // Font smoothing not available
+          trackingProtection: realDoNotTrack === '1' ? 'Enabled' : 'Disabled',
+          doNotTrackStatus: realDoNotTrack,
+          adBlockerStatus: 'Unknown', // Ad blocker detection is possible but would be invasive
+          browserExtensions: randomBrowserExtensions, // Extensions not accessible for security
+          activeWindows: 'Unknown', // Browser windows not accessible
+          openTabs: 'Unknown', // Other tabs not accessible
+          systemUptime: 'Unknown', // System uptime not available
+          cpuUsage: 'Unknown', // CPU usage not available in browser
+          memoryUsage: 'Unknown', // Memory usage not available
+          diskUsage: 'Unknown', // Disk usage not available
+          networkActivity: 'Unknown', // Network activity not available
+          lastReboot: 'Unknown', // System reboot time not available
+          systemVersion: realPlatform,
+          antivirus: 'Unknown', // Antivirus not available
+          firewallStatus: 'Unknown', // Firewall not available
+          remoteAccess: 'Unknown', // Remote access not available
+          clipboardContent: 'Unknown', // Clipboard requires permission
+          clipboardHistory: 'Unknown', // Clipboard history not available
+          recentApps: 'Browser Tab', // Would need system access
+          recentFiles: 'Unknown', // Recent files not available
+          downloadSpeed: 'Unknown', // Speed tests require external services
+          uploadSpeed: 'Unknown', // Speed tests require external services
+          ping: 'Unknown', // Ping requires external services
+          dnsProvider: 'Unknown', // DNS info not available
+          macAddress: 'Unknown', // MAC address not available (good!)
+          networkInterfaces: 'Unknown', // Network interfaces not available
+          routerModel: 'Unknown', // Router info not available
+          routerFirmware: 'Unknown', // Router info not available
+          routerIp: 'Unknown', // Router IP not available
+          publicIp: localIP, // Using the local IP as public IP (not accurate but for demo)
+          asn: 'Unknown', // ASN requires external lookup
+          isp: 'Unknown', // ISP requires external lookup
+          locationCity: 'Unknown', // Location requires permission
+          locationCountry: 'Unknown', // Location requires permission
+          locationRegion: 'Unknown', // Location requires permission
+          locationZip: 'Unknown', // Location requires permission
+          locationTimezone: realTimezone,
+          locationMethod: 'Unknown', // Location method not available
+          locationLastUpdate: 'Unknown', // Location requires permission
+          locationPermission: 'Unknown', // Location requires permission
+          locationHistory: 'Unknown', // Location requires permission
+          locationSharing: 'Unknown', // Location requires permission
+          locationServices: 'Unknown', // Location requires permission
+          locationAccuracyMode: 'Unknown', // Location requires permission
+          locationBackground: 'Unknown', // Location requires permission
+          locationGeofencing: 'Unknown', // Location requires permission
+          locationBeacon: 'Unknown', // Location requires permission
+          locationWifi: 'Unknown', // WiFi info not available
+          locationBluetooth: 'Unknown', // Bluetooth requires permission
+          locationNfc: 'Unknown', // NFC requires permission
+          locationGps: 'Unknown', // GPS requires permission
+          locationCell: 'Unknown', // Cell tower info not available
+          locationSatellites: 'Unknown', // GPS satellites require permission
+          locationSignalStrength: 'Unknown', // Signal strength not available
+          locationAltitude: 'Unknown', // Location requires permission
+          locationBearing: 'Unknown', // Location requires permission
+          locationSpeed: 'Unknown', // Location requires permission
+          locationHeading: 'Unknown', // Location requires permission
+        });
+      });
+    });
+  };
+
+  // Simple click approach for the easter egg
+  const triggerEasterEgg = () => {
+    getUserInfo();
+    setShowEasterEgg(true);
+  };
+
+  return (
+    <>
+      {showEasterEgg ? (
+        <div className="fixed inset-0 bg-black/90 z-50 flex items-center justify-center p-4">
+          <div className="bg-gray-900 border-2 border-red-500 rounded-xl p-6 max-w-2xl w-full max-h-[90vh] overflow-y-auto">
+            <div className="flex justify-between items-center mb-4">
+              <h2 className="text-2xl font-bold text-red-500 flex items-center gap-2">
+                <Eye className="w-6 h-6" /> SYSTEM BREACH DETECTED
+              </h2>
+              <Button
+                onClick={() => setShowEasterEgg(false)}
+                variant="secondary"
+                className="text-red-500 border-red-500 hover:bg-red-500/10"
+              >
+                <EyeOff className="w-4 h-4" />
+              </Button>
+            </div>
+
+            <div className="space-y-3 text-sm">
+              <div className="p-3 bg-red-900/30 rounded-lg border border-red-700">
+                <div className="font-mono text-red-400">ACCESSING USER DATA...</div>
+              </div>
+
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                <div className="p-3 bg-gray-800/50 rounded border border-gray-700">
+                  <div className="text-xs text-gray-500">LOCAL IP ADDRESS</div>
+                  <div className="font-mono text-emerald-400">{userInfo.ip}</div>
+                </div>
+
+                <div className="p-3 bg-gray-800/50 rounded border border-gray-700">
+                  <div className="text-xs text-gray-500">USER AGENT</div>
+                  <div className="font-mono text-emerald-400 text-xs">{userInfo.userAgent}</div>
+                </div>
+
+                <div className="p-3 bg-gray-800/50 rounded border border-gray-700">
+                  <div className="text-xs text-gray-500">PLATFORM</div>
+                  <div className="font-mono text-emerald-400">{userInfo.platform}</div>
+                </div>
+
+                <div className="p-3 bg-gray-800/50 rounded border border-gray-700">
+                  <div className="text-xs text-gray-500">LANGUAGE</div>
+                  <div className="font-mono text-emerald-400">{userInfo.language}</div>
+                </div>
+
+                <div className="p-3 bg-gray-800/50 rounded border border-gray-700">
+                  <div className="text-xs text-gray-500">TIMEZONE</div>
+                  <div className="font-mono text-emerald-400">{userInfo.timezone}</div>
+                </div>
+
+                <div className="p-3 bg-gray-800/50 rounded border border-gray-700">
+                  <div className="text-xs text-gray-500">SCREEN RESOLUTION</div>
+                  <div className="font-mono text-emerald-400">{userInfo.screenRes}</div>
+                </div>
+
+                <div className="p-3 bg-gray-800/50 rounded border border-gray-700">
+                  <div className="text-xs text-gray-500">CONNECTION TYPE</div>
+                  <div className="font-mono text-emerald-400">{userInfo.connection}</div>
+                </div>
+
+                <div className="p-3 bg-gray-800/50 rounded border border-gray-700">
+                  <div className="text-xs text-gray-500">DEVICE TYPE</div>
+                  <div className="font-mono text-emerald-400">{userInfo.device}</div>
+                </div>
+
+                <div className="p-3 bg-gray-800/50 rounded border border-gray-700">
+                  <div className="text-xs text-gray-500">LOCATION ACCURACY</div>
+                  <div className="font-mono text-emerald-400">{userInfo.locationAccuracy}</div>
+                </div>
+
+                <div className="p-3 bg-gray-800/50 rounded border border-gray-700">
+                  <div className="text-xs text-gray-500">LAST SEEN</div>
+                  <div className="font-mono text-emerald-400 text-xs">{userInfo.lastSeen}</div>
+                </div>
+
+                <div className="p-3 bg-gray-800/50 rounded border border-gray-700">
+                  <div className="text-xs text-gray-500">SESSION ID</div>
+                  <div className="font-mono text-emerald-400 text-xs">{userInfo.sessionId}</div>
+                </div>
+
+                <div className="p-3 bg-gray-800/50 rounded border border-gray-700">
+                  <div className="text-xs text-gray-500">DEVICE ID</div>
+                  <div className="font-mono text-emerald-400 text-xs">{userInfo.deviceId}</div>
+                </div>
+
+                <div className="p-3 bg-gray-800/50 rounded border border-gray-700">
+                  <div className="text-xs text-gray-500">FINGERPRINT</div>
+                  <div className="font-mono text-emerald-400 text-xs">{userInfo.fingerprint}</div>
+                </div>
+
+                <div className="p-3 bg-gray-800/50 rounded border border-gray-700">
+                  <div className="text-xs text-gray-500">BROWSER VERSION</div>
+                  <div className="font-mono text-emerald-400">{userInfo.browserVersion}</div>
+                </div>
+
+                <div className="p-3 bg-gray-800/50 rounded border border-gray-700">
+                  <div className="text-xs text-gray-500">ONLINE STATUS</div>
+                  <div className="font-mono text-emerald-400">{userInfo.onlineStatus}</div>
+                </div>
+
+                <div className="p-3 bg-gray-800/50 rounded border border-gray-700">
+                  <div className="text-xs text-gray-500">DO NOT TRACK</div>
+                  <div className="font-mono text-emerald-400">{userInfo.doNotTrack}</div>
+                </div>
+
+                <div className="p-3 bg-gray-800/50 rounded border border-gray-700">
+                  <div className="text-xs text-gray-500">HARDWARE CORES</div>
+                  <div className="font-mono text-emerald-400">{userInfo.hardwareConcurrency}</div>
+                </div>
+
+                <div className="p-3 bg-gray-800/50 rounded border border-gray-700">
+                  <div className="text-xs text-gray-500">DEVICE MEMORY</div>
+                  <div className="font-mono text-emerald-400">{userInfo.deviceMemory}</div>
+                </div>
+
+                <div className="p-3 bg-gray-800/50 rounded border border-gray-700">
+                  <div className="text-xs text-gray-500">BATTERY LEVEL</div>
+                  <div className="font-mono text-emerald-400">{userInfo.batteryLevel}</div>
+                </div>
+
+                <div className="p-3 bg-gray-800/50 rounded border border-gray-700">
+                  <div className="text-xs text-gray-500">TIMEZONE OFFSET</div>
+                  <div className="font-mono text-emerald-400">{userInfo.timezoneOffset}</div>
+                </div>
+
+                <div className="p-3 bg-gray-800/50 rounded border border-gray-700">
+                  <div className="text-xs text-gray-500">REFERRER</div>
+                  <div className="font-mono text-emerald-400">{userInfo.referrer}</div>
+                </div>
+
+                <div className="p-3 bg-gray-800/50 rounded border border-gray-700">
+                  <div className="text-xs text-gray-500">INSTALLED FONTS</div>
+                  <div className="font-mono text-emerald-400 text-xs">{userInfo.installedFonts}</div>
+                </div>
+
+                <div className="p-3 bg-gray-800/50 rounded border border-gray-700 md:col-span-2">
+                  <div className="text-xs text-gray-500">COOKIES</div>
+                  <div className="font-mono text-emerald-400 text-xs break-all">{userInfo.cookies}</div>
+                </div>
+
+                {/* Additional enhanced data fields */}
+                <div className="p-3 bg-gray-800/50 rounded border border-gray-700">
+                  <div className="text-xs text-gray-500">CPU MODEL</div>
+                  <div className="font-mono text-emerald-400">{userInfo.cpuModel}</div>
+                </div>
+
+                <div className="p-3 bg-gray-800/50 rounded border border-gray-700">
+                  <div className="text-xs text-gray-500">GPU MODEL</div>
+                  <div className="font-mono text-emerald-400">{userInfo.gpuModel}</div>
+                </div>
+
+                <div className="p-3 bg-gray-800/50 rounded border border-gray-700">
+                  <div className="text-xs text-gray-500">RAM SIZE</div>
+                  <div className="font-mono text-emerald-400">{userInfo.ramSize}</div>
+                </div>
+
+                <div className="p-3 bg-gray-800/50 rounded border border-gray-700">
+                  <div className="text-xs text-gray-500">STORAGE SIZE</div>
+                  <div className="font-mono text-emerald-400">{userInfo.storageSize}</div>
+                </div>
+
+                <div className="p-3 bg-gray-800/50 rounded border border-gray-700">
+                  <div className="text-xs text-gray-500">BATTERY STATUS</div>
+                  <div className="font-mono text-emerald-400">{userInfo.batteryStatus}</div>
+                </div>
+
+                <div className="p-3 bg-gray-800/50 rounded border border-gray-700">
+                  <div className="text-xs text-gray-500">NETWORK SPEED</div>
+                  <div className="font-mono text-emerald-400">{userInfo.networkSpeed}</div>
+                </div>
+
+                <div className="p-3 bg-gray-800/50 rounded border border-gray-700">
+                  <div className="text-xs text-gray-500">SCREEN ORIENTATION</div>
+                  <div className="font-mono text-emerald-400">{userInfo.screenOrientation}</div>
+                </div>
+
+                <div className="p-3 bg-gray-800/50 rounded border border-gray-700">
+                  <div className="text-xs text-gray-500">SCREEN DENSITY</div>
+                  <div className="font-mono text-emerald-400">{userInfo.screenDensity}</div>
+                </div>
+
+                <div className="p-3 bg-gray-800/50 rounded border border-gray-700">
+                  <div className="text-xs text-gray-500">REFRESH RATE</div>
+                  <div className="font-mono text-emerald-400">{userInfo.screenRefreshRate}</div>
+                </div>
+
+                <div className="p-3 bg-gray-800/50 rounded border border-gray-700">
+                  <div className="text-xs text-gray-500">KEYBOARD LAYOUT</div>
+                  <div className="font-mono text-emerald-400">{userInfo.keyboardLayout}</div>
+                </div>
+
+                <div className="p-3 bg-gray-800/50 rounded border border-gray-700">
+                  <div className="text-xs text-gray-500">ACTIVE TAB</div>
+                  <div className="font-mono text-emerald-400 text-xs">{userInfo.activeTabTitle}</div>
+                </div>
+
+                <div className="p-3 bg-gray-800/50 rounded border border-gray-700">
+                  <div className="text-xs text-gray-500">SYSTEM THEME</div>
+                  <div className="font-mono text-emerald-400">{userInfo.systemTheme}</div>
+                </div>
+
+                <div className="p-3 bg-gray-800/50 rounded border border-gray-700">
+                  <div className="text-xs text-gray-500">ACCESSIBILITY</div>
+                  <div className="font-mono text-emerald-400">{userInfo.accessibilityFeatures}</div>
+                </div>
+
+                <div className="p-3 bg-gray-800/50 rounded border border-gray-700">
+                  <div className="text-xs text-gray-500">TRACKING PROTECTION</div>
+                  <div className="font-mono text-emerald-400">{userInfo.trackingProtection}</div>
+                </div>
+
+                <div className="p-3 bg-gray-800/50 rounded border border-gray-700">
+                  <div className="text-xs text-gray-500">AD BLOCKER</div>
+                  <div className="font-mono text-emerald-400">{userInfo.adBlockerStatus}</div>
+                </div>
+
+                <div className="p-3 bg-gray-800/50 rounded border border-gray-700">
+                  <div className="text-xs text-gray-500">BROWSER EXTENSIONS</div>
+                  <div className="font-mono text-emerald-400 text-xs">{userInfo.browserExtensions}</div>
+                </div>
+
+                <div className="p-3 bg-gray-800/50 rounded border border-gray-700">
+                  <div className="text-xs text-gray-500">ACTIVE WINDOWS</div>
+                  <div className="font-mono text-emerald-400">{userInfo.activeWindows}</div>
+                </div>
+
+                <div className="p-3 bg-gray-800/50 rounded border border-gray-700">
+                  <div className="text-xs text-gray-500">OPEN TABS</div>
+                  <div className="font-mono text-emerald-400">{userInfo.openTabs}</div>
+                </div>
+
+                <div className="p-3 bg-gray-800/50 rounded border border-gray-700">
+                  <div className="text-xs text-gray-500">SYSTEM UPTIME</div>
+                  <div className="font-mono text-emerald-400">{userInfo.systemUptime}</div>
+                </div>
+
+                <div className="p-3 bg-gray-800/50 rounded border border-gray-700">
+                  <div className="text-xs text-gray-500">CPU USAGE</div>
+                  <div className="font-mono text-emerald-400">{userInfo.cpuUsage}</div>
+                </div>
+
+                <div className="p-3 bg-gray-800/50 rounded border border-gray-700">
+                  <div className="text-xs text-gray-500">MEMORY USAGE</div>
+                  <div className="font-mono text-emerald-400">{userInfo.memoryUsage}</div>
+                </div>
+
+                <div className="p-3 bg-gray-800/50 rounded border border-gray-700">
+                  <div className="text-xs text-gray-500">DISK USAGE</div>
+                  <div className="font-mono text-emerald-400">{userInfo.diskUsage}</div>
+                </div>
+
+                <div className="p-3 bg-gray-800/50 rounded border border-gray-700">
+                  <div className="text-xs text-gray-500">NETWORK ACTIVITY</div>
+                  <div className="font-mono text-emerald-400">{userInfo.networkActivity}</div>
+                </div>
+
+                <div className="p-3 bg-gray-800/50 rounded border border-gray-700">
+                  <div className="text-xs text-gray-500">LAST REBOOT</div>
+                  <div className="font-mono text-emerald-400 text-xs">{userInfo.lastReboot}</div>
+                </div>
+
+                <div className="p-3 bg-gray-800/50 rounded border border-gray-700">
+                  <div className="text-xs text-gray-500">SYSTEM VERSION</div>
+                  <div className="font-mono text-emerald-400">{userInfo.systemVersion}</div>
+                </div>
+
+                <div className="p-3 bg-gray-800/50 rounded border border-gray-700">
+                  <div className="text-xs text-gray-500">ANTIVIRUS</div>
+                  <div className="font-mono text-emerald-400">{userInfo.antivirus}</div>
+                </div>
+
+                <div className="p-3 bg-gray-800/50 rounded border border-gray-700">
+                  <div className="text-xs text-gray-500">FIREWALL STATUS</div>
+                  <div className="font-mono text-emerald-400">{userInfo.firewallStatus}</div>
+                </div>
+
+                <div className="p-3 bg-gray-800/50 rounded border border-gray-700">
+                  <div className="text-xs text-gray-500">REMOTE ACCESS</div>
+                  <div className="font-mono text-emerald-400">{userInfo.remoteAccess}</div>
+                </div>
+
+                <div className="p-3 bg-gray-800/50 rounded border border-gray-700">
+                  <div className="text-xs text-gray-500">CLIPBOARD CONTENT</div>
+                  <div className="font-mono text-emerald-400">{userInfo.clipboardContent}</div>
+                </div>
+
+                <div className="p-3 bg-gray-800/50 rounded border border-gray-700">
+                  <div className="text-xs text-gray-500">CLIPBOARD HISTORY</div>
+                  <div className="font-mono text-emerald-400">{userInfo.clipboardHistory}</div>
+                </div>
+
+                <div className="p-3 bg-gray-800/50 rounded border border-gray-700">
+                  <div className="text-xs text-gray-500">RECENT APPS</div>
+                  <div className="font-mono text-emerald-400 text-xs">{userInfo.recentApps}</div>
+                </div>
+
+                <div className="p-3 bg-gray-800/50 rounded border border-gray-700">
+                  <div className="text-xs text-gray-500">RECENT FILES</div>
+                  <div className="font-mono text-emerald-400 text-xs">{userInfo.recentFiles}</div>
+                </div>
+
+                <div className="p-3 bg-gray-800/50 rounded border border-gray-700">
+                  <div className="text-xs text-gray-500">DOWNLOAD SPEED</div>
+                  <div className="font-mono text-emerald-400">{userInfo.downloadSpeed}</div>
+                </div>
+
+                <div className="p-3 bg-gray-800/50 rounded border border-gray-700">
+                  <div className="text-xs text-gray-500">UPLOAD SPEED</div>
+                  <div className="font-mono text-emerald-400">{userInfo.uploadSpeed}</div>
+                </div>
+
+                <div className="p-3 bg-gray-800/50 rounded border border-gray-700">
+                  <div className="text-xs text-gray-500">PING</div>
+                  <div className="font-mono text-emerald-400">{userInfo.ping}</div>
+                </div>
+
+                <div className="p-3 bg-gray-800/50 rounded border border-gray-700">
+                  <div className="text-xs text-gray-500">DNS PROVIDER</div>
+                  <div className="font-mono text-emerald-400">{userInfo.dnsProvider}</div>
+                </div>
+
+                <div className="p-3 bg-gray-800/50 rounded border border-gray-700">
+                  <div className="text-xs text-gray-500">MAC ADDRESS</div>
+                  <div className="font-mono text-emerald-400">{userInfo.macAddress}</div>
+                </div>
+
+                <div className="p-3 bg-gray-800/50 rounded border border-gray-700">
+                  <div className="text-xs text-gray-500">NETWORK INTERFACES</div>
+                  <div className="font-mono text-emerald-400">{userInfo.networkInterfaces}</div>
+                </div>
+
+                <div className="p-3 bg-gray-800/50 rounded border border-gray-700">
+                  <div className="text-xs text-gray-500">ROUTER MODEL</div>
+                  <div className="font-mono text-emerald-400">{userInfo.routerModel}</div>
+                </div>
+
+                <div className="p-3 bg-gray-800/50 rounded border border-gray-700">
+                  <div className="text-xs text-gray-500">ROUTER FIRMWARE</div>
+                  <div className="font-mono text-emerald-400">{userInfo.routerFirmware}</div>
+                </div>
+
+                <div className="p-3 bg-gray-800/50 rounded border border-gray-700">
+                  <div className="text-xs text-gray-500">ROUTER IP</div>
+                  <div className="font-mono text-emerald-400">{userInfo.routerIp}</div>
+                </div>
+
+                <div className="p-3 bg-gray-800/50 rounded border border-gray-700">
+                  <div className="text-xs text-gray-500">PUBLIC IP</div>
+                  <div className="font-mono text-emerald-400">{userInfo.publicIp}</div>
+                </div>
+
+                <div className="p-3 bg-gray-800/50 rounded border border-gray-700">
+                  <div className="text-xs text-gray-500">ASN</div>
+                  <div className="font-mono text-emerald-400">{userInfo.asn}</div>
+                </div>
+
+                <div className="p-3 bg-gray-800/50 rounded border border-gray-700">
+                  <div className="text-xs text-gray-500">ISP</div>
+                  <div className="font-mono text-emerald-400">{userInfo.isp}</div>
+                </div>
+
+                <div className="p-3 bg-gray-800/50 rounded border border-gray-700">
+                  <div className="text-xs text-gray-500">CITY</div>
+                  <div className="font-mono text-emerald-400">{userInfo.locationCity}</div>
+                </div>
+
+                <div className="p-3 bg-gray-800/50 rounded border border-gray-700">
+                  <div className="text-xs text-gray-500">COUNTRY</div>
+                  <div className="font-mono text-emerald-400">{userInfo.locationCountry}</div>
+                </div>
+
+                <div className="p-3 bg-gray-800/50 rounded border border-gray-700">
+                  <div className="text-xs text-gray-500">REGION</div>
+                  <div className="font-mono text-emerald-400">{userInfo.locationRegion}</div>
+                </div>
+
+                <div className="p-3 bg-gray-800/50 rounded border border-gray-700">
+                  <div className="text-xs text-gray-500">ZIP CODE</div>
+                  <div className="font-mono text-emerald-400">{userInfo.locationZip}</div>
+                </div>
+
+                <div className="p-3 bg-gray-800/50 rounded border border-gray-700">
+                  <div className="text-xs text-gray-500">LOCATION TIMEZONE</div>
+                  <div className="font-mono text-emerald-400">{userInfo.locationTimezone}</div>
+                </div>
+
+                <div className="p-3 bg-gray-800/50 rounded border border-gray-700">
+                  <div className="text-xs text-gray-500">LOCATION METHOD</div>
+                  <div className="font-mono text-emerald-400">{userInfo.locationMethod}</div>
+                </div>
+
+                <div className="p-3 bg-gray-800/50 rounded border border-gray-700">
+                  <div className="text-xs text-gray-500">LOCATION LAST UPDATE</div>
+                  <div className="font-mono text-emerald-400 text-xs">{userInfo.locationLastUpdate}</div>
+                </div>
+
+                <div className="p-3 bg-gray-800/50 rounded border border-gray-700">
+                  <div className="text-xs text-gray-500">LOCATION PERMISSION</div>
+                  <div className="font-mono text-emerald-400">{userInfo.locationPermission}</div>
+                </div>
+
+                <div className="p-3 bg-gray-800/50 rounded border border-gray-700">
+                  <div className="text-xs text-gray-500">LOCATION HISTORY</div>
+                  <div className="font-mono text-emerald-400">{userInfo.locationHistory}</div>
+                </div>
+
+                <div className="p-3 bg-gray-800/50 rounded border border-gray-700">
+                  <div className="text-xs text-gray-500">LOCATION SHARING</div>
+                  <div className="font-mono text-emerald-400">{userInfo.locationSharing}</div>
+                </div>
+
+                <div className="p-3 bg-gray-800/50 rounded border border-gray-700">
+                  <div className="text-xs text-gray-500">LOCATION SERVICES</div>
+                  <div className="font-mono text-emerald-400">{userInfo.locationServices}</div>
+                </div>
+
+                <div className="p-3 bg-gray-800/50 rounded border border-gray-700">
+                  <div className="text-xs text-gray-500">LOCATION ACCURACY MODE</div>
+                  <div className="font-mono text-emerald-400">{userInfo.locationAccuracyMode}</div>
+                </div>
+
+                <div className="p-3 bg-gray-800/50 rounded border border-gray-700">
+                  <div className="text-xs text-gray-500">LOCATION BACKGROUND</div>
+                  <div className="font-mono text-emerald-400">{userInfo.locationBackground}</div>
+                </div>
+
+                <div className="p-3 bg-gray-800/50 rounded border border-gray-700">
+                  <div className="text-xs text-gray-500">LOCATION GEO FENCING</div>
+                  <div className="font-mono text-emerald-400">{userInfo.locationGeofencing}</div>
+                </div>
+
+                <div className="p-3 bg-gray-800/50 rounded border border-gray-700">
+                  <div className="text-xs text-gray-500">LOCATION BEACON</div>
+                  <div className="font-mono text-emerald-400">{userInfo.locationBeacon}</div>
+                </div>
+
+                <div className="p-3 bg-gray-800/50 rounded border border-gray-700">
+                  <div className="text-xs text-gray-500">LOCATION WIFI</div>
+                  <div className="font-mono text-emerald-400">{userInfo.locationWifi}</div>
+                </div>
+
+                <div className="p-3 bg-gray-800/50 rounded border border-gray-700">
+                  <div className="text-xs text-gray-500">LOCATION BLUETOOTH</div>
+                  <div className="font-mono text-emerald-400">{userInfo.locationBluetooth}</div>
+                </div>
+
+                <div className="p-3 bg-gray-800/50 rounded border border-gray-700">
+                  <div className="text-xs text-gray-500">LOCATION NFC</div>
+                  <div className="font-mono text-emerald-400">{userInfo.locationNfc}</div>
+                </div>
+
+                <div className="p-3 bg-gray-800/50 rounded border border-gray-700">
+                  <div className="text-xs text-gray-500">LOCATION GPS</div>
+                  <div className="font-mono text-emerald-400">{userInfo.locationGps}</div>
+                </div>
+
+                <div className="p-3 bg-gray-800/50 rounded border border-gray-700">
+                  <div className="text-xs text-gray-500">LOCATION CELL</div>
+                  <div className="font-mono text-emerald-400">{userInfo.locationCell}</div>
+                </div>
+
+                <div className="p-3 bg-gray-800/50 rounded border border-gray-700">
+                  <div className="text-xs text-gray-500">LOCATION SATELLITES</div>
+                  <div className="font-mono text-emerald-400">{userInfo.locationSatellites}</div>
+                </div>
+
+                <div className="p-3 bg-gray-800/50 rounded border border-gray-700">
+                  <div className="text-xs text-gray-500">LOCATION SIGNAL</div>
+                  <div className="font-mono text-emerald-400">{userInfo.locationSignalStrength}</div>
+                </div>
+
+                <div className="p-3 bg-gray-800/50 rounded border border-gray-700">
+                  <div className="text-xs text-gray-500">LOCATION ALTITUDE</div>
+                  <div className="font-mono text-emerald-400">{userInfo.locationAltitude}</div>
+                </div>
+
+                <div className="p-3 bg-gray-800/50 rounded border border-gray-700">
+                  <div className="text-xs text-gray-500">LOCATION BEARING</div>
+                  <div className="font-mono text-emerald-400">{userInfo.locationBearing}</div>
+                </div>
+
+                <div className="p-3 bg-gray-800/50 rounded border border-gray-700">
+                  <div className="text-xs text-gray-500">LOCATION SPEED</div>
+                  <div className="font-mono text-emerald-400">{userInfo.locationSpeed}</div>
+                </div>
+
+                <div className="p-3 bg-gray-800/50 rounded border border-gray-700">
+                  <div className="text-xs text-gray-500">LOCATION HEADING</div>
+                  <div className="font-mono text-emerald-400">{userInfo.locationHeading}</div>
+                </div>
+              </div>
+
+              <div className="p-3 bg-red-900/30 rounded-lg border border-red-700 mt-4">
+                <div className="font-mono text-red-400 text-center">
+                  ALL SYSTEMS COMPROMISED. YOU ARE BEING WATCHED.
+                </div>
+              </div>
+            </div>
+
+            <div className="mt-6 text-center text-xs text-gray-500">
+              <p>This is just a fun easter egg! Some data is simulated for entertainment.</p>
+              <p className="mt-1">Click "System Status" in the header to access again</p>
+              <p className="mt-1">Press ESC or click the close button to return.</p>
+            </div>
+          </div>
+        </div>
+      ) : game === 'menu' ? (
+        <div className="max-w-4xl mx-auto space-y-8">
+            <div className="flex items-center gap-4">
+                <Button onClick={onBack} variant="secondary" className="px-4 py-3">
+                    <ArrowLeft className="w-6 h-6" />
+                </Button>
+                <div>
+                    <h2
+                      className="text-3xl font-bold bg-gradient-to-r from-purple-500 to-indigo-500 bg-clip-text text-transparent flex items-center gap-3 cursor-pointer"
+                      onClick={triggerEasterEgg}
+                      title="System Status"
+                    >
+                        <Gamepad2 className="w-10 h-10 text-purple-500" />
+                        AI Arcade
+                    </h2>
+                    <p className="text-gray-400">Challenge local neural networks for cash.</p>
+                </div>
+            </div>
+
+            <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6">
+                <GameCard
+                    type="ttt"
+                    title="Tic-Tac-Toe"
+                    subtitle="Vs. Minimax Engine"
+                    icon={Brain}
+                    styles={{
+                        color: 'blue',
+                        iconBg: 'bg-blue-500/10',
+                        iconColor: 'text-blue-400',
+                        textColor: 'text-blue-400',
+                        button: 'bg-blue-600',
+                        buttonHover: 'hover:bg-blue-500'
+                    }}
+                    onClick={() => setGame('ttt')}
+                />
+
+                <GameCard
+                    type="rps"
+                    title="RPS AI"
+                    subtitle="Vs. Pattern AI"
+                    icon={RefreshCw}
+                    styles={{
+                        color: 'pink',
+                        iconBg: 'bg-pink-500/10',
+                        iconColor: 'text-pink-400',
+                        textColor: 'text-pink-400',
+                        button: 'bg-pink-600',
+                        buttonHover: 'hover:bg-pink-500'
+                    }}
+                    onClick={() => setGame('rps')}
+                />
+
+                <GameCard
+                    type="blackjack"
+                    title="Blackjack"
+                    subtitle="Vs. Dealer"
+                    icon={CreditCard}
+                    styles={{
+                        color: 'green',
+                        iconBg: 'bg-green-500/10',
+                        iconColor: 'text-green-400',
+                        textColor: 'text-green-400',
+                        button: 'bg-green-600',
+                        buttonHover: 'hover:bg-green-500'
+                    }}
+                    onClick={() => setGame('blackjack')}
+                />
+
+                <GameCard
+                    type="memory"
+                    title="Memory Hack"
+                    subtitle="Vs. Sequence Gen"
+                    icon={Grid}
+                    styles={{
+                        color: 'yellow',
+                        iconBg: 'bg-yellow-500/10',
+                        iconColor: 'text-yellow-400',
+                        textColor: 'text-yellow-400',
+                        button: 'bg-yellow-600',
+                        buttonHover: 'hover:bg-yellow-500'
+                    }}
+                    onClick={() => setGame('memory')}
+                />
+
+                <GameCard
+                    type="fishing"
+                    title="Fishing"
+                    subtitle="Catch Rare Fish"
+                    icon={Fish}
+                    styles={{
+                        color: 'blue',
+                        iconBg: 'bg-blue-500/10',
+                        iconColor: 'text-blue-400',
+                        textColor: 'text-blue-400',
+                        button: 'bg-blue-600',
+                        buttonHover: 'hover:bg-blue-500'
+                    }}
+                    onClick={() => setGame('fishing')}
+                />
+
+                <GameCard
+                    type="plinko"
+                    title="Plinko"
+                    subtitle="Drop & Win"
+                    icon={Anchor}
+                    styles={{
+                        color: 'purple',
+                        iconBg: 'bg-purple-500/10',
+                        iconColor: 'text-purple-400',
+                        textColor: 'text-purple-400',
+                        button: 'bg-purple-600',
+                        buttonHover: 'hover:bg-purple-500'
+                    }}
+                    onClick={() => setGame('plinko')}
+                />
+            </div>
+        </div>
+      ) : (
+        <div className="max-w-2xl mx-auto space-y-8 pb-20">
+          <div className="flex items-center justify-between">
+              <div className="flex items-center gap-3">
+                  <Button onClick={() => setGame('menu')} variant="secondary" className="py-3">
+                      <ArrowLeft className="w-5 h-5 mr-2" /> Back to Menu
+                  </Button>
+                  <button
+                    onClick={triggerEasterEgg}
+                    className="p-2 rounded-full hover:bg-gray-800 transition-colors duration-300"
+                    title="System Status"
+                  >
+                    <Eye className="w-5 h-5 text-gray-400 hover:text-purple-400" />
+                  </button>
+              </div>
+              <div className="font-mono text-emerald-400 font-bold bg-gray-900 px-4 py-2 rounded-lg border border-emerald-900">
+                  Balance: ${formatNumber(balance)}
+              </div>
+          </div>
+
+          <Card className="p-6">
+              {/* Betting UI (Hide during active blackjack/memory hand) */}
+              {!(game === 'blackjack' && bjStatus !== 'betting' && bjStatus !== 'gameOver') && !(game === 'memory' && memState.status !== 'idle' && memState.status !== 'fail' && memState.status !== 'success') && (
+                <div className="flex flex-col gap-4 mb-8 bg-gray-900/50 p-4 rounded-xl border border-gray-800">
+                  {isTroll && (
+                    <div className="flex items-center gap-2 text-yellow-500 bg-yellow-900/20 p-2 rounded-lg border border-yellow-500/30">
+                      <AlertTriangle className="w-4 h-4" />
+                      <span className="text-sm font-medium">Troll Account - Reduced rewards, higher costs</span>
+                    </div>
+                  )}
+                  <div className="flex items-center gap-4">
+                    <div className="flex-1">
+                        <label className="text-xs text-gray-500 uppercase font-bold mb-1 block">Wager Amount</label>
+                        <div className="flex items-center gap-2">
+                            <span className="text-emerald-500 font-bold">$</span>
+                            <input
+                                type="number"
+                                value={bet}
+                                onChange={handleBetChange}
+                                className="bg-transparent border-none text-xl font-bold text-white focus:ring-0 w-full p-0"
+                                disabled={game === 'ttt' && board.some(x => x !== null) && gameStatus === 'playing'}
+                            />
+                        </div>
+                      </div>
+                      <Button onClick={setMaxBet} variant="secondary" className="text-xs">Max</Button>
+                  </div>
+                </div>
+              )}
+
+              {/* TIC TAC TOE GAME */}
+              {game === 'ttt' && (
+                  <div className="space-y-6">
+                      <div className="flex flex-col items-center">
+                          <h3 className="text-xl font-bold mb-2 flex items-center justify-center gap-2">
+                              Tic-Tac-Toe
+                          </h3>
+                          <div className="flex gap-2 mb-4 bg-gray-900 p-1 rounded-lg">
+                              {(['easy', 'medium', 'hard', 'impossible'] as TTTDifficulty[]).map(d => (
+                                  <button
+                                      key={d}
+                                      onClick={() => { if(board.every(x => x === null)) setTttDifficulty(d); }}
+                                      disabled={!board.every(x => x === null)}
+                                      className={`px-3 py-1 text-xs rounded-md capitalize transition-all ${tttDifficulty === d ? 'bg-blue-600 text-white font-bold' : 'text-gray-500 hover:text-gray-300'}`}
+                                  >
+                                      {d}
+                                  </button>
+                              ))}
+                          </div>
+
+                          <div className="flex items-center gap-2 text-sm text-gray-400 mb-4">
+                              {gameStatus === 'playing' ? (
+                                  isPlayerTurn ? <span className="text-blue-400 font-bold animate-pulse">Your Turn</span> : <span className="text-red-400 font-bold">AI Thinking...</span>
+                              ) : (
+                                  <span className="font-bold text-white">Game Over</span>
+                              )}
+                          </div>
+                      </div>
+
+                      <div className="grid grid-cols-3 gap-2 max-w-[300px] mx-auto bg-gray-800 p-2 rounded-2xl">
+                          {board.map((cell, i) => {
+                              // Visual Animation Logic
+                              let cellColor = 'bg-gray-900 hover:bg-gray-700';
+                              if (cell === 'X') cellColor = 'bg-blue-500/20 text-blue-400 shadow-blue-900/20';
+                              if (cell === 'O') cellColor = 'bg-red-500/20 text-red-400 shadow-red-900/20';
+
+                              let animationClass = '';
+                              if (gameStatus === 'won') {
+                                  cellColor = 'bg-emerald-500 text-black border-emerald-400 scale-105';
+                                  animationClass = 'transition-all duration-500 ease-out';
+                              } else if (gameStatus === 'lost') {
+                                  cellColor = 'bg-red-600 text-white border-red-500';
+                                  animationClass = 'transition-all duration-500 ease-out';
+                              }
+
+                              return (
+                                  <button
+                                      key={i}
+                                      onClick={() => handleTTTClick(i)}
+                                      disabled={!!cell || gameStatus !== 'playing' || !isPlayerTurn}
+                                      className={`aspect-square rounded-xl text-4xl font-black flex items-center justify-center shadow-inner ${cellColor} ${animationClass}`}
+                                      style={{ transitionDelay: (gameStatus === 'won' || gameStatus === 'lost') ? `${i * 50}ms` : '0ms' }}
+                                  >
+                                      {cell === 'X' && <X className="w-12 h-12" />}
+                                      {cell === 'O' && <Circle className="w-10 h-10" />}
+                                  </button>
+                              );
+                          })}
+                      </div>
+
+                      {gameStatus !== 'playing' && (
+                          <div className="text-center animate-in fade-in zoom-in duration-300 bg-gray-900/50 p-4 rounded-xl border border-gray-800">
+                              <div className={`text-2xl font-bold mb-2 ${
+                                  gameStatus === 'won' ? 'text-emerald-400' :
+                                  gameStatus === 'lost' ? 'text-red-400' : 'text-gray-400'
+                              }`}>
+                                  {gameStatus === 'won' ? 'YOU WON!' :
+                                   gameStatus === 'lost' ? 'AI WINS!' : 'DRAW!'}
+                              </div>
+                              <p className="text-xs text-gray-500 mb-4">
+                                  {gameStatus === 'won' ? `Payout: ${tttDifficulty === 'impossible' ? '5x (JACKPOT)' : tttDifficulty === 'hard' ? '2x' : '1.x'}` : gameStatus === 'lost' ? 'Better luck next time' : 'Bet Refunded'}
+                              </p>
+                              <Button onClick={resetTTT} className="w-full max-w-[200px] bg-blue-600 hover:bg-blue-500">Play Again</Button>
+                          </div>
+                      )}
+                  </div>
+              )}
+
+              {/* RPS GAME */}
+              {game === 'rps' && (
+                  <div className="space-y-8 text-center">
+                      <div className="flex justify-between items-start">
+                        <div className="text-left">
+                            <h3 className="text-xl font-bold text-white">Rock Paper Scissors</h3>
+                            <p className="text-xs text-gray-400">Pattern Recognition AI v1.0</p>
+                        </div>
+                        <div className="text-right flex flex-col items-end">
+                            <div className="text-xs text-gray-500 uppercase font-bold mb-1">AI Confidence</div>
+                            <div className="flex items-center gap-2">
+                                <Gauge className={`w-4 h-4 ${aiConfidence > 70 ? 'text-red-500' : aiConfidence > 40 ? 'text-yellow-500' : 'text-green-500'}`} />
+                                <div className="w-24 h-2 bg-gray-800 rounded-full overflow-hidden">
+                                    <div
+                                        className={`h-full transition-all duration-500 ${aiConfidence > 70 ? 'bg-red-500' : aiConfidence > 40 ? 'bg-yellow-500' : 'bg-green-500'}`}
+                                        style={{ width: `${aiConfidence}%` }}
+                                    ></div>
+                                </div>
+                                <span className="text-xs font-mono w-8">{aiConfidence}%</span>
+                            </div>
+                        </div>
+                      </div>
+
+                      {rpsResult && (
+                          <div className="flex items-center justify-center gap-4 md:gap-8 py-6 bg-gray-900/50 rounded-xl border border-gray-800 relative overflow-hidden">
+                              <div className={`absolute inset-0 opacity-10 ${rpsResult.outcome === 'win' ? 'bg-emerald-500' : rpsResult.outcome === 'lose' ? 'bg-red-500' : 'bg-gray-500'}`}></div>
+
+                              <div className="text-center relative z-10">
+                                  <div className="text-xs text-gray-500 mb-2 uppercase tracking-widest">You</div>
+                                  <div className="text-5xl animate-in slide-in-from-left-4 duration-300">
+                                    {rpsResult.player === 'rock' ? '🪨' : rpsResult.player === 'paper' ? '📄' : '✂️'}
+                                  </div>
+                              </div>
+
+                              <div className="text-2xl font-black text-gray-700 relative z-10">VS</div>
+
+                              <div className="text-center relative z-10">
+                                  <div className="text-xs text-gray-500 mb-2 uppercase tracking-widest flex items-center gap-1 justify-center">
+                                      AI <Cpu className="w-3 h-3" />
+                                  </div>
+                                  <div className="text-5xl animate-in slide-in-from-right-4 duration-300">
+                                    {rpsResult.ai === 'rock' ? '🪨' : rpsResult.ai === 'paper' ? '📄' : '✂️'}
+                                  </div>
+                              </div>
+                          </div>
+                      )}
+
+                      {rpsResult && (
+                          <div className={`text-3xl font-black italic transform -skew-x-6 animate-in fade-in zoom-in duration-300 ${
+                              rpsResult.outcome === 'win' ? 'text-emerald-400 drop-shadow-[0_0_10px_rgba(52,211,153,0.5)]' :
+                              rpsResult.outcome === 'lose' ? 'text-red-400 drop-shadow-[0_0_10px_rgba(248,113,113,0.5)]' : 'text-gray-400'
+                          }`}>
+                              {rpsResult.outcome === 'win' ? 'YOU WIN!' :
+                               rpsResult.outcome === 'lose' ? 'AI WINS!' : 'DRAW'}
+                          </div>
+                      )}
+
+                      <div className="grid grid-cols-3 gap-4">
+                          {(['rock', 'paper', 'scissors'] as RPSMove[]).map(move => (
+                              <button
+                                  key={move}
+                                  onClick={() => handleRPSPlay(move)}
+                                  className="aspect-square rounded-2xl bg-gray-800 hover:bg-gray-700 hover:-translate-y-1 hover:shadow-xl hover:shadow-purple-500/10 transition-all flex flex-col items-center justify-center gap-2 border-2 border-gray-700 hover:border-purple-500 group"
+                              >
+                                  <div className="text-5xl group-hover:scale-110 transition-transform duration-300">
+                                      {move === 'rock' ? '🪨' : move === 'paper' ? '📄' : '✂️'}
+                                  </div>
+                                  <span className="text-xs font-bold uppercase tracking-wider text-gray-400 group-hover:text-white">
+                                      {move}
+                                  </span>
+                              </button>
+                          ))}
+                      </div>
+                  </div>
+              )}
+
+              {/* BLACKJACK GAME */}
+              {game === 'blackjack' && (
+                  <div className="space-y-8">
+                       <div className="text-center">
+                          <h3 className="text-xl font-bold text-white mb-2">Cosmic Blackjack</h3>
+                          <div className="inline-block px-3 py-1 rounded bg-gray-800 text-xs text-gray-400 border border-gray-700">
+                             Dealer stands on 17 • Blackjack pays 3:2
+                          </div>
+                       </div>
+
+                       {/* Dealer Area */}
+                       <div className="space-y-2">
+                           <div className="text-xs text-gray-500 font-bold uppercase ml-2">Dealer</div>
+                           <div className="flex justify-center gap-2 h-28 md:h-32">
+                               {dealerHand.map((card, i) => renderCard(card, i))}
+                               {dealerHand.length === 0 && <div className="text-gray-700 flex items-center text-sm">Waiting for deal...</div>}
+                           </div>
+                           {dealerHand.length > 0 && !dealerHand[1]?.isHidden && (
+                               <div className="text-center text-sm font-bold text-gray-400">
+                                   Value: {calculateHandValue(dealerHand)}
+                               </div>
+                           )}
+                       </div>
+
+                       {/* Player Area */}
+                       <div className="space-y-2">
+                           <div className="text-xs text-gray-500 font-bold uppercase ml-2">Player (You)</div>
+                           <div className="flex justify-center gap-2 h-28 md:h-32">
+                               {playerHand.map((card, i) => renderCard(card, i))}
+                               {playerHand.length === 0 && <div className="text-gray-700 flex items-center text-sm">Waiting for deal...</div>}
+                           </div>
+                           {playerHand.length > 0 && (
+                               <div className="text-center text-sm font-bold text-emerald-400">
+                                   Value: {calculateHandValue(playerHand)}
+                               </div>
+                           )}
+                       </div>
+
+                        {/* Controls */}
+                        <div className="flex justify-center gap-4 mt-8">
+                            {bjStatus === 'betting' || bjStatus === 'gameOver' ? (
+                                <Button
+                                    onClick={startBlackjack}
+                                    className="w-full max-w-sm bg-green-600 hover:bg-green-500 shadow-[0_0_20px_rgba(34,197,94,0.3)] animate-pulse"
+                                >
+                                    {bjStatus === 'gameOver' ? 'Play Again' : 'Deal Cards'}
+                                </Button>
+                            ) : (
+                                <>
+                                    <Button
+                                        onClick={hit}
+                                        disabled={bjStatus !== 'playing'}
+                                        className="w-24 bg-blue-600 hover:bg-blue-500"
+                                    >
+                                        HIT
+                                    </Button>
+                                    <Button
+                                        onClick={() => handleStand()}
+                                        disabled={bjStatus !== 'playing'}
+                                        className="w-24 bg-red-600 hover:bg-red-500"
+                                    >
+                                        STAND
+                                    </Button>
+                                    {playerHand.length === 2 && (
+                                        <Button
+                                            onClick={doubleDown}
+                                            disabled={bjStatus !== 'playing'}
+                                            className="w-24 bg-yellow-600 hover:bg-yellow-500"
+                                        >
+                                            DOUBLE
+                                        </Button>
+                                    )}
+                                </>
+                            )}
+                        </div>
+
+                        {/* Result Overlay */}
+                        {bjStatus === 'gameOver' && bjOutcome && (
+                            <div className="text-center animate-in fade-in zoom-in duration-300 bg-gray-900/50 p-4 rounded-xl border border-gray-800 mt-4">
+                                <div className={`text-3xl font-black italic transform -skew-x-6 mb-2 ${
+                                    bjOutcome === 'win' || bjOutcome === 'blackjack' ? 'text-emerald-400 drop-shadow-[0_0_10px_rgba(52,211,153,0.5)]' :
+                                    bjOutcome === 'lose' ? 'text-red-400 drop-shadow-[0_0_10px_rgba(248,113,113,0.5)]' : 'text-gray-400'
+                                }`}>
+                                    {bjOutcome === 'blackjack' ? 'BLACKJACK!' :
+                                     bjOutcome === 'win' ? 'YOU WIN!' :
+                                     bjOutcome === 'lose' ? 'HOUSE WINS' : 'PUSH'}
+                                </div>
+                                <p className="text-sm text-gray-400">
+                                    {bjOutcome === 'blackjack' ? `Payout: $${formatNumber(Math.floor(bet * 2.5))}` :
+                                     bjOutcome === 'win' ? `Payout: $${formatNumber(bet * 2)}` :
+                                     bjOutcome === 'push' ? 'Bet Returned' : 'Better luck next time'}
+                                </p>
+                            </div>
+                        )}
+                  </div>
+              )}
+
+               {/* MEMORY HACK GAME */}
+               {game === 'memory' && (
+                  <div className="space-y-6 text-center">
+                      <div>
+                          <h3 className="text-xl font-bold text-white">Memory Hack</h3>
+                          <div className="flex items-center justify-center gap-4 mt-2">
+                             <span className="text-sm text-yellow-400 font-mono">Level: {memState.level}</span>
+                             <span className="text-sm text-gray-500">Status: {memState.status.toUpperCase()}</span>
+                          </div>
+                      </div>
+
+                      <div className="grid grid-cols-3 gap-3 max-w-[300px] mx-auto p-4 bg-gray-800/50 rounded-2xl border border-yellow-900/30">
+                          {Array.from({ length: 9 }).map((_, i) => {
+                                let squareClass = 'bg-gray-900 border-gray-700 hover:border-gray-500';
+                                let animationStyle = {};
+
+                                if (activeButton === i) {
+                                    squareClass = 'bg-yellow-400 border-yellow-200 shadow-[0_0_15px_rgba(250,204,21,0.6)] scale-95';
+                                }
+
+                                if (memState.status === 'success') {
+                                    squareClass = 'bg-emerald-500 border-emerald-400 scale-105';
+                                    animationStyle = { transitionDelay: `${i * 50}ms`, transitionDuration: '500ms' };
+                                } else if (memState.status === 'fail') {
+                                    squareClass = 'bg-red-600 border-red-500 scale-95';
+                                    animationStyle = { transitionDelay: `${i * 50}ms`, transitionDuration: '500ms' };
+                                }
+
+                                return (
+                                  <button
+                                      key={i}
+                                      onClick={() => handleMemoryInput(i)}
+                                      disabled={memState.status !== 'input'}
+                                      className={`aspect-square rounded-lg border-2 transition-all duration-100 ${squareClass}`}
+                                      style={animationStyle}
+                                  >
+                                  </button>
+                                );
+                          })}
+                      </div>
+
+                      {memState.status === 'idle' && (
+                          <Button onClick={startMemoryGame} className="w-full max-w-xs bg-yellow-600 hover:bg-yellow-500">
+                             Start Hack Sequence
+                          </Button>
+                      )}
+
+                      {memState.status === 'fail' && (
+                          <div className="animate-in fade-in slide-in-from-top-4">
+                              <h4 className="text-red-500 font-bold text-xl mb-2">ACCESS DENIED</h4>
+                              <p className="text-gray-400 text-sm mb-4">Sequence broken at level {memState.level}</p>
+                              <Button onClick={startMemoryGame} className="w-full max-w-xs bg-red-900/50 hover:bg-red-800 border border-red-500/30 text-red-200">
+                                  Retry Hack
+                              </Button>
+                          </div>
+                      )}
+
+                      {memState.status === 'success' && (
+                          <div className="animate-in fade-in slide-in-from-top-4">
+                              <h4 className="text-emerald-400 font-bold text-xl mb-2">SYSTEM BREACHED</h4>
+                              <p className="text-gray-400 text-sm mb-4">You completed all 5 levels!</p>
+                              <Button
+                                onClick={() => {
+                                  // Record successful game for training
+                                  setMemoryGameHistory(prev => [...prev, {
+                                    sequence: memState.sequence,
+                                    playerSequence: memState.playerInput,
+                                    success: true
+                                  }]);
+                                  startMemoryGame();
+                                }}
+                                className="w-full max-w-xs bg-emerald-600 hover:bg-emerald-500"
+                              >
+                                  Hack Again
+                              </Button>
+                          </div>
+                      )}
+
+                      {memState.status === 'fail' && (
+                          <Button
+                            onClick={() => {
+                              // Record failed game for training
+                              setMemoryGameHistory(prev => [...prev, {
+                                sequence: memState.sequence,
+                                playerSequence: memState.playerInput,
+                                success: false
+                              }]);
+                              startMemoryGame();
+                            }}
+                            className="w-full max-w-xs bg-red-900/50 hover:bg-red-800 border border-red-500/30 text-red-200"
+                          >
+                              Retry Hack
+                          </Button>
+                      )}
+
+                      <div className="text-xs text-gray-500">
+                          Memorize the pattern. Repeat it back. <br/>
+                          Payouts increase with sequence length.
+                      </div>
+                  </div>
+              )}
+
+          </Card>
+        </div>
+      ) : game === 'fishing' ? (
+        <div className="max-w-6xl mx-auto">
+          <FishingGame
+            balance={balance}
+            onUpdateBalance={onUpdateBalance}
+            onBack={() => setGame('menu')}
+          />
+        </div>
+      ) : game === 'plinko' ? (
+        <div className="max-w-6xl mx-auto">
+          <PlinkoGame
+            balance={balance}
+            onUpdateBalance={onUpdateBalance}
+            onBack={() => setGame('menu')}
+          />
+        </div>
+      )}
+    </>
+  );
+            onBack={() => setGame('menu')}
+          />
+        </div>
+      )}
+    </>
+  );
+            onBack={() => setGame('menu')}
+          />
+        </div>
+      )}
+    </>
+  );
+
+  // Train models when component unmounts
+  useEffect(() => {
+    return () => {
+      // Train models with session data when leaving
+      trainModels();
+    };
+  }, []);
+}
+
+export default Arcade;

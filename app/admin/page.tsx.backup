@@ -1,0 +1,623 @@
+'use client';
+import React, { useState, useEffect } from 'react';
+import { X, Shield, DollarSign, Zap, Sparkles, Trash2, Eye, RotateCcw, HandCoins, Code, TrendingUp, Activity, Award, MessageSquare, Loader2, RefreshCw, User, ShieldAlert, Database, Server, Cpu, Settings, Edit3, UserPlus, Users, Search, Filter, EyeOff, EyeIcon } from 'lucide-react';
+import { Card, Button, formatNumber, calculateLevel, calculateRequiredXpForLevel } from '@/components/Shared';
+import { getSession, setSession } from '@/services/auth-client';
+import PasswordProtection from '@/components/PasswordProtection';
+import UserEditModal from '@/components/UserEditModal';
+
+export default function AdminPage() {
+  const [activeTab, setActiveTab] = useState('general');
+  const [sqlQuery, setSqlQuery] = useState('');
+  const [queryResult, setQueryResult] = useState<any[]>([]);
+  const [queryError, setQueryError] = useState('');
+  const [showPasswordModal, setShowPasswordModal] = useState(true);
+  const [users, setUsers] = useState<UserData[]>([]);
+  const [loadingUsers, setLoadingUsers] = useState(false);
+  const [selectedUser, setSelectedUser] = useState<UserData | null>(null);
+  const [searchTerm, setSearchTerm] = useState('');
+  const [userFilter, setUserFilter] = useState('all');
+  const [isImpersonating, setIsImpersonating] = useState(false);
+
+  useEffect(() => {
+    if (typeof window !== 'undefined') {
+      setIsImpersonating(localStorage.getItem('adminSession') !== null);
+    }
+  }, []);
+
+
+  // Admin functions for economy management
+  const applyGlobalMultiplier = async (multiplier: number) => {
+    try {
+      const response = await fetch('/api/admin/economy', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({ action: 'applyGlobalMultiplier', multiplier }),
+      });
+
+      if (!response.ok) {
+        throw new Error('Failed to apply multiplier');
+      }
+
+      alert(`Global multiplier set to ${multiplier}x`);
+    } catch (error) {
+      console.error('Error applying multiplier:', error);
+      alert('Error applying multiplier');
+    }
+  };
+
+  const giveFreeCurrency = async (amount: number) => {
+    try {
+      const response = await fetch('/api/admin/economy', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({ action: 'giveFreeCurrency', amount }),
+      });
+
+      if (!response.ok) {
+        throw new Error('Failed to give free currency');
+      }
+
+      alert(`Gave ${amount} currency to all users`);
+    } catch (error) {
+      console.error('Error giving free currency:', error);
+      alert('Error giving free currency');
+    }
+  };
+
+  const giveFreeXp = async (amount: number) => {
+    try {
+      const response = await fetch('/api/admin/economy', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({ action: 'giveFreeXp', amount }),
+      });
+
+      if (!response.ok) {
+        throw new Error('Failed to give free XP');
+      }
+
+      alert(`Gave ${amount} XP to all users`);
+    } catch (error) {
+      console.error('Error giving free XP:', error);
+      alert('Error giving free XP');
+    }
+  };
+
+  // Admin functions for user powers
+  const setPowerLevel = async (userId: number, powerType: string, level: number) => {
+    try {
+      const response = await fetch(`/api/users/${userId}`, {
+        method: 'PUT',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({ [powerType]: level }),
+      });
+
+      if (!response.ok) {
+        throw new Error(`Failed to set ${powerType} level`);
+      }
+
+      alert(`${powerType} level set to ${level} for user ${userId}`);
+      loadUsers(); // Refresh the user list
+    } catch (error) {
+      console.error(`Error setting ${powerType} level:`, error);
+      alert(`Error setting ${powerType} level`);
+    }
+  };
+
+  const toggleSpecialItem = async (userId: number, item: string) => {
+    try {
+      const response = await fetch(`/api/users/${userId}`, {
+        method: 'PUT',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({ [item]: true }), // Toggle the item
+      });
+
+      if (!response.ok) {
+        throw new Error(`Failed to toggle ${item}`);
+      }
+
+      alert(`${item} toggled for user ${userId}`);
+      loadUsers(); // Refresh the user list
+    } catch (error) {
+      console.error(`Error toggling ${item}:`, error);
+      alert(`Error toggling ${item}`);
+    }
+  };
+
+  const updateUser = async (userToUpdate: UserData) => {
+    if (!userToUpdate) return;
+
+    try {
+      const response = await fetch(`/api/users/${userToUpdate.id}`, {
+        method: 'PUT',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify(userToUpdate),
+      });
+
+      if (!response.ok) {
+        throw new Error('Failed to update user');
+      }
+
+      alert('User updated successfully');
+      setSelectedUser(null);
+      loadUsers(); // Refresh the user list
+    } catch (error) {
+      console.error('Error updating user:', error);
+      alert('Error updating user');
+    }
+  };
+
+  const deleteUser = async (userId: number) => {
+    if (!confirm('Are you sure you want to delete this user? This action cannot be undone.')) {
+      return;
+    }
+
+    try {
+      const response = await fetch(`/api/users/${userId}`, {
+        method: 'DELETE',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+      });
+
+      if (!response.ok) {
+        throw new Error('Failed to delete user');
+      }
+
+      alert('User deleted successfully');
+      loadUsers(); // Refresh the user list
+    } catch (error) {
+      console.error('Error deleting user:', error);
+      alert('Error deleting user');
+    }
+  };
+
+  const banUser = async (userId: number, isBanned: boolean) => {
+    try {
+      const response = await fetch(`/api/users/${userId}`, {
+        method: 'PUT',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({ is_banned: isBanned }),
+      });
+
+      if (!response.ok) {
+        throw new Error(`Failed to ${isBanned ? 'ban' : 'unban'} user`);
+      }
+
+      alert(`User ${isBanned ? 'banned' : 'unbanned'} successfully`);
+      loadUsers(); // Refresh the user list
+    } catch (error) {
+      console.error(`Error ${isBanned ? 'banning' : 'unbanning'} user:`, error);
+      alert(`Error ${isBanned ? 'banning' : 'unbanning'} user`);
+    }
+  };
+
+  const trollUser = async (userId: number, isTroll: boolean) => {
+    try {
+      const response = await fetch(`/api/users/${userId}`, {
+        method: 'PUT',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({ is_troll: isTroll }),
+      });
+
+      if (!response.ok) {
+        throw new Error(`Failed to ${isTroll ? 'troll' : 'untroll'} user`);
+      }
+
+      alert(`User ${isTroll ? 'trolled' : 'untrolled'} successfully`);
+      loadUsers(); // Refresh the user list
+    } catch (error) {
+      console.error(`Error ${isTroll ? 'trolling' : 'untrolling'} user:`, error);
+      alert(`Error ${isTroll ? 'trolling' : 'untrolling'} user`);
+    }
+  };
+
+  const handlePasswordSuccess = () => {
+    setShowPasswordModal(false);
+    // Load users after authentication
+    loadUsers();
+  };
+
+  const loadUsers = async () => {
+    try {
+      setLoadingUsers(true);
+      const response = await fetch('/api/users', {
+        method: 'GET',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+      });
+
+      if (!response.ok) {
+        throw new Error('Failed to load users');
+      }
+
+      const usersData = await response.json();
+      setUsers(usersData);
+    } catch (error) {
+      console.error('Error loading users:', error);
+    } finally {
+      setLoadingUsers(false);
+    }
+  };
+
+  // Execute SQL query on MariaDB
+  const executeQuery = async () => {
+    try {
+      setQueryError('');
+      const queryLower = sqlQuery.toLowerCase().trim();
+
+      // Send the query to the API
+      const response = await fetch('/api/db/query', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({ query: sqlQuery }),
+      });
+
+      if (!response.ok) {
+        const errorData = await response.json();
+        throw new Error(errorData.error || 'Error executing query');
+      }
+
+      const result = await response.json();
+      setQueryResult(result.data || []);
+    } catch (error: any) {
+      console.error('Query error:', error);
+      setQueryError(error.message || 'Error executing query');
+      setQueryResult([]);
+    }
+  };
+
+  const impersonateUser = (userToImpersonate: UserData) => {
+    const adminSession = getSession();
+    if (adminSession) {
+      localStorage.setItem('adminSession', JSON.stringify(adminSession));
+    }
+    setSession(userToImpersonate.firebase_id, userToImpersonate.email, userToImpersonate.username);
+    window.location.href = '/';
+  };
+
+  const stopImpersonating = () => {
+    const adminSession = localStorage.getItem('adminSession');
+    if (adminSession) {
+      const parsedAdminSession = JSON.parse(adminSession);
+      setSession(parsedAdminSession.userId, parsedAdminSession.email, parsedAdminSession.username);
+      localStorage.removeItem('adminSession');
+      window.location.href = '/admin';
+    }
+  };
+
+  const editUser = (user: UserData) => {
+    setSelectedUser(user);
+  };
+
+  const createUser = async () => {
+    try {
+      const newUser = {
+        email: 'newuser@example.com',
+        username: 'NewUser',
+        balance: 1000,
+        xp: 0,
+        luckLevel: 0,
+        autoRollLevel: 0,
+        multiRollLevel: 0,
+        goldenTouchLevel: 0,
+        hasProgrammerSocks: false,
+        hasDoubleSell: false,
+        hasMarketBot: false,
+        forcedRarity: null,
+        marketMultiplier: 1.0,
+        createdAt: new Date(),
+        lastLogin: new Date(),
+        activeCosmetic: null,
+        ownedCosmetics: [],
+        stats: {
+          totalRolls: 0,
+          totalEarned: 0,
+          highestRarityIndex: -1,
+          rebirths: 0,
+        },
+        history: [],
+      };
+
+      const response = await fetch('/api/users', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify(newUser),
+      });
+
+      if (!response.ok) {
+        throw new Error('Failed to create user');
+      }
+
+      alert('New user created successfully');
+      loadUsers(); // Refresh the user list
+    } catch (error) {
+      console.error('Error creating user:', error);
+      alert('Error creating user');
+    }
+  };
+
+  // Filter users based on search term and filter
+  const filteredUsers = users.filter(user => {
+    const matchesSearch = user.username.toLowerCase().includes(searchTerm.toLowerCase()) ||
+                          user.email.toLowerCase().includes(searchTerm.toLowerCase());
+    return matchesSearch;
+  });
+
+  return (
+    <>
+      <PasswordProtection
+        isOpen={showPasswordModal}
+        onClose={() => {}}
+        onSuccess={handlePasswordSuccess}
+      />
+      <UserEditModal
+        isOpen={!!selectedUser}
+        user={selectedUser}
+        onClose={() => setSelectedUser(null)}
+        onSave={updateUser}
+      />
+      <div className="min-h-screen bg-[#050505] text-white p-6">
+        <div className="max-w-6xl mx-auto">
+        <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4 mb-8">
+          <div className="flex items-center gap-4">
+            <div className="p-3 bg-red-500/[0.2] rounded-xl">
+              <Shield className="w-8 h-8 text-red-400" />
+            </div>
+            <div>
+              <h1 className="text-3xl font-bold">Admin Console</h1>
+              <p className="text-gray-400">System management & monitoring</p>
+            </div>
+          </div>
+          <div className="flex gap-3">
+            {isImpersonating && (
+              <button
+                onClick={stopImpersonating}
+                className="px-4 py-2 bg-yellow-600 hover:bg-yellow-500 text-white rounded-lg text-sm font-medium transition-colors flex items-center gap-2"
+              >
+                <EyeOff className="w-4 h-4" />
+                Stop Impersonating
+              </button>
+            )}
+            <a
+              href="/db-viewer"
+              className="px-4 py-2 bg-blue-600 hover:bg-blue-500 text-white rounded-lg text-sm font-medium transition-colors flex items-center gap-2"
+            >
+              <Database className="w-4 h-4" />
+              See Database
+            </a>
+          </div>
+        </div>
+          {impersonatingUser && (
+            <div className="flex items-center gap-2 bg-yellow-900/[0.3] border border-yellow-500/[0.3] rounded-lg px-4 py-2">
+              <EyeIcon className="w-4 h-4 text-yellow-400" />
+              <span className="text-yellow-400 text-sm">Impersonating: {impersonatingUser}</span>
+              <button
+                onClick={() => setImpersonatingUser(null)}
+                className="ml-2 text-xs bg-yellow-600 hover:bg-yellow-500 px-2 py-1 rounded"
+              >
+                Stop
+              </button>
+            </div>
+          )}
+        </div>
+
+        <div className="grid grid-cols-1 lg:grid-cols-4 gap-6">
+          {/* Sidebar */}
+          <div className="lg:col-span-1">
+            <Card className="space-y-2">
+              {[
+                { id: 'general', label: 'General', icon: Shield },
+                { id: 'users', label: 'User Management', icon: Users },
+                { id: 'economy', label: 'Economy', icon: DollarSign },
+                { id: 'powers', label: 'Powers', icon: Zap },
+                { id: 'rolls', label: 'Roll System', icon: Zap },
+                { id: 'content', label: 'Content', icon: Sparkles },
+                { id: 'database', label: 'Database', icon: Database },
+              ].map((tab) => (
+                <button
+                  key={tab.id}
+                  onClick={() => setActiveTab(tab.id)}
+                  className={`w-full flex items-center gap-3 px-4 py-3 rounded-lg text-left transition-colors ${
+                    activeTab === tab.id
+                      ? 'bg-red-600/[0.3] text-red-400 border border-red-500/[0.3]'
+                      : 'hover:bg-gray-800/[0.5]'
+                  }`}
+                >
+                  <tab.icon className="w-5 h-5" />
+                  <span>{tab.label}</span>
+                </button>
+              ))}
+            </Card>
+          </div>
+
+          {/* Main Content */}
+          <div className="lg:col-span-3">
+            <Card className="p-6">
+              {activeTab === 'general' && (
+                <div className="space-y-6">
+                  <h2 className="text-xl font-bold flex items-center gap-2">
+                    <Shield className="w-6 h-6 text-red-400" />
+                    General Controls
+                  </h2>
+
+                  <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                    <Button
+                      onClick={() => {
+                        // Generate a test roll (simulated)
+                        alert('Test roll generated! This would create a sample roll in a real implementation.');
+                      }}
+                      className="bg-purple-600 hover:bg-purple-500 h-20 flex flex-col justify-center"
+                    >
+                      <Zap className="w-6 h-6 mb-2" />
+                      <span>Generate Test Roll</span>
+                    </Button>
+
+                    <Button
+                      onClick={() => {
+                        if (confirm('Are you sure you want to reset ALL data? This will delete all user data and cannot be undone.')) {
+                          alert('All data reset functionality would be implemented here in a real system.');
+                        }
+                      }}
+                      variant="danger"
+                      className="h-20 flex flex-col justify-center"
+                    >
+                      <Trash2 className="w-6 h-6 mb-2" />
+                      <span>Reset All Data</span>
+                    </Button>
+
+                    <Button
+                      onClick={() => {
+                        alert('Stats update functionality would be implemented here in a real system.');
+                      }}
+                      className="bg-blue-600 hover:bg-blue-500 h-20 flex flex-col justify-center"
+                    >
+                      <Activity className="w-6 h-6 mb-2" />
+                      <span>Update Stats</span>
+                    </Button>
+
+                    <Button
+                      onClick={() => {
+                        alert('Cache refresh functionality would be implemented here in a real system.');
+                      }}
+                      className="bg-green-600 hover:bg-green-500 h-20 flex flex-col justify-center"
+                    >
+                      <RefreshCw className="w-6 h-6 mb-2" />
+                      <span>Refresh Cache</span>
+                    </Button>
+                  </div>
+                </div>
+              )}
+
+              {activeTab === 'users' && (
+                <div className="space-y-6">
+                  <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-4">
+                    <h2 className="text-xl font-bold flex items-center gap-2">
+                      <User className="w-6 h-6 text-blue-400" />
+                      User Management
+                    </h2>
+                    <div className="flex gap-2">
+                      <Button onClick={loadUsers} className="flex items-center gap-2">
+                        <RefreshCw className="w-4 h-4" />
+                        Refresh
+                      </Button>
+                      <Button onClick={createUser} className="bg-green-600 hover:bg-green-500 flex items-center gap-2">
+                        <UserPlus className="w-4 h-4" />
+                        Create User
+                      </Button>
+                    </div>
+                  </div>
+
+                  {/* Search and Filter */}
+                  <div className="flex flex-col md:flex-row gap-4">
+                    <div className="relative flex-1">
+                      <Search className="absolute left-3 top-[50%] transform -translate-y-[50%] w-4 h-4 text-gray-500" />
+                      <input
+                        type="text"
+                        placeholder="Search users..."
+                        value={searchTerm}
+                        onChange={(e) => setSearchTerm(e.target.value)}
+                        className="w-full pl-10 pr-4 py-2 bg-gray-800 border border-gray-700 rounded-lg text-white focus:ring-2 focus:ring-blue-500 focus:border-transparent outline-none"
+                      />
+                    </div>
+                    <select
+                      value={userFilter}
+                      onChange={(e) => setUserFilter(e.target.value)}
+                      className="px-4 py-2 bg-gray-800 border border-gray-700 rounded-lg text-white focus:ring-2 focus:ring-blue-500 focus:border-transparent outline-none"
+                    >
+                      <option value="all">All Users</option>
+                    </select>
+                  </div>
+
+                  {/* User List */}
+                  <div className="overflow-x-auto">
+                    {loadingUsers ? (
+                      <div className="flex justify-center items-center py-10">
+                        <Loader2 className="w-8 h-8 animate-spin text-gray-400" />
+                      </div>
+                    ) : (
+                      <table className="min-w-full divide-y divide-gray-700">
+                        <thead>
+                          <tr>
+                            <th className="px-4 py-2 text-left text-xs font-medium text-gray-400 uppercase tracking-wider">User</th>
+                            <th className="px-4 py-2 text-left text-xs font-medium text-gray-400 uppercase tracking-wider">Stats</th>
+                            <th className="px-4 py-2 text-left text-xs font-medium text-gray-400 uppercase tracking-wider">Status</th>
+                            <th className="px-4 py-2 text-left text-xs font-medium text-gray-400 uppercase tracking-wider">Actions</th>
+                          </tr>
+                        </thead>
+                        <tbody className="divide-y divide-gray-800">
+                          {filteredUsers.map((user) => (
+                            <tr key={user.id}>
+                              <td className="px-4 py-4 whitespace-nowrap">
+                                <div className="flex items-center">
+                                  <div className="flex-shrink-0 h-10 w-10">
+                                    {/* Placeholder for avatar */}
+                                    <div className="h-10 w-10 rounded-full bg-gray-700 flex items-center justify-center">
+                                      <User className="w-6 h-6 text-gray-400" />
+                                    </div>
+                                  </div>
+                                  <div className="ml-4">
+                                    <div className="text-sm font-medium text-white">{user.username}</div>
+                                    <div className="text-sm text-gray-400">{user.email}</div>
+                                  </div>
+                                </div>
+                              </td>
+                              <td className="px-4 py-4 whitespace-nowrap">
+                                <div className="text-sm text-white">Balance: {formatNumber(user.balance)}</div>
+                                <div className="text-sm text-gray-400">XP: {formatNumber(user.xp)} (Lvl {calculateLevel(user.xp)})</div>
+                              </td>
+                              <td className="px-4 py-4 whitespace-nowrap">
+                                <div className="flex flex-col gap-1">
+                                  <span className={`px-2 inline-flex text-xs leading-5 font-semibold rounded-full ${
+                                    user.is_banned
+                                      ? 'bg-red-900 text-red-300'
+                                      : 'bg-green-900 text-green-300'
+                                  }`}>
+                                    {user.is_banned ? 'Banned' : 'Active'}
+                                  </span>
+                                  <span className={`px-2 inline-flex text-xs leading-5 font-semibold rounded-full ${
+                                    user.is_troll
+                                      ? 'bg-yellow-900 text-yellow-300'
+                                      : 'bg-gray-800 text-gray-300'
+                                  }`}>
+                                    {user.is_troll ? 'Troll' : 'Normal'}
+                                  </span>
+                                </div>
+                              </td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}

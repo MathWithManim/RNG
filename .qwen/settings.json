@@ -1,0 +1,30 @@
+{
+  "mcpServers": {
+    "web-search": {
+      "command": "node",
+      "args": [
+        "/data/data/com.termux/files/usr/lib/node_modules/duckduckgo-mcp-server/build/index.js"
+      ]
+    },
+    "sequential-thinking": {
+      "command": "node",
+      "args": [
+        "/data/data/com.termux/files/usr/lib/node_modules/@modelcontextprotocol/server-sequential-thinking/dist/index.js"
+      ]
+    },
+    "filesystem": {
+      "command": "node",
+      "args": [
+        "/data/data/com.termux/files/usr/lib/node_modules/@modelcontextprotocol/server-filesystem/dist/index.js",
+        "/data/data/com.termux/files/home/test"
+      ]
+    },
+    "next-devtools": {
+      "command": "node",
+      "args": [
+        "/data/data/com.termux/files/usr/lib/node_modules/next-devtools-mcp/dist/index.js"
+      ]
+    }
+  },
+  "$version": 2
+}
