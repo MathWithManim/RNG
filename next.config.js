@@ -2,7 +2,10 @@ import bundleAnalyzer from '@next/bundle-analyzer';
 
 /** @type {import('next').NextConfig} */
 const nextConfig = {
-  serverExternalPackages: [],
+  serverExternalPackages: [
+    'better-sqlite3',
+    'bindings'
+  ],
   images: {
     remotePatterns: [
       {
@@ -17,6 +20,9 @@ const nextConfig = {
     removeConsole: process.env.NODE_ENV === "production",
   },
   webpack: (config, { dev, isServer }) => {
+    if (isServer) {
+      config.externals.push('better-sqlite3');
+    }
     return config;
   },
   async headers() {
@@ -35,6 +41,10 @@ const nextConfig = {
         ],
       },
     ];
+  },
+  // Force Next.js to use Node.js runtime instead of Edge Runtime
+  experimental: {
+    serverComponentsExternalPackages: ['better-sqlite3'],
   },
   // Note: No rewrites needed since we're using a catch-all route
 };

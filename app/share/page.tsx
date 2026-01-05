@@ -1,5 +1,6 @@
 'use client';
-import React, { useState, useRef, ChangeEvent } from 'react';
+import React, { useState, useRef } from 'react';
+import type { ChangeEvent } from 'react';
 import { Upload, File, Copy, Check, AlertCircle, Globe, Zap, Shield } from 'lucide-react';
 
 export default function SharePage() {
