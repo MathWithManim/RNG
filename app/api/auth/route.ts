@@ -1,3 +1,5 @@
+export const runtime = 'nodejs';
+
 import { NextRequest, NextResponse } from 'next/server';
 import { checkEmailExists, createUser, getUserByEmailWithPassword } from '../../../lib/database-sqlite';
 

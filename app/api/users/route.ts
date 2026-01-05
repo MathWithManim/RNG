@@ -1,4 +1,6 @@
 import { NextRequest } from 'next/server';
+export const runtime = 'nodejs';
+
 // import { getSession } from '@/services/auth';
 import { db } from '@/lib/database-sqlite';
 

@@ -1,3 +1,5 @@
+export const runtime = 'nodejs';
+
 import { NextRequest } from 'next/server';
 import { getSession } from '@/services/auth-client';
 import { getUserData, convertDbUserToUserData, updateUserData, checkUserExistsByEmail } from '@/services/auth'; // Import convertDbUserToUserData, and updateUserData
